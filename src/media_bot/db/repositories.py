@@ -9,6 +9,7 @@ import aiosqlite
 
 from media_bot.db.database import Database
 from media_bot.db.models import (
+    ItemFile,
     MediaItem,
     PendingUpload,
     PendingUploadMessage,
@@ -62,12 +63,18 @@ class ItemRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def create_stored_item(self, item: MediaItem) -> MediaItem:
+    async def create_stored_item(
+        self, item: MediaItem, *, clear_pending_upload_id: str | None = None
+    ) -> MediaItem:
         _require_positive_int(item.owner_user_id, "owner_user_id")
         _validate_text(item.media_type, "media_type", max_length=32)
         _validate_file_size(item.file_size_bytes)
         if not isinstance(item.protect_content, bool):
             raise InvalidRecord("protect_content must be a boolean")
+        if item.sha256 is not None and (
+            not isinstance(item.sha256, bytes) or len(item.sha256) != 32
+        ):
+            raise InvalidRecord("sha256 must be a 32-byte digest or None")
         if not item.storage_messages:
             raise InvalidRecord("A shareable item must have at least one storage message")
         sequences: set[int] = set()
@@ -82,6 +89,32 @@ class ItemRepository:
                 raise InvalidRecord("storage message references must be unique")
             sequences.add(reference.sequence)
             references.add((reference.chat_id, reference.message_id))
+        file_sequences: set[int] = set()
+        for stored_file in item.files:
+            if (
+                isinstance(stored_file.sequence, bool)
+                or not isinstance(stored_file.sequence, int)
+                or stored_file.sequence < 0
+            ):
+                raise InvalidRecord("item-file sequence must be a non-negative integer")
+            if stored_file.sequence in file_sequences:
+                raise InvalidRecord("item-file sequences must be unique")
+            file_sequences.add(stored_file.sequence)
+            _validate_text(stored_file.media_type, "media_type", max_length=32)
+            _validate_text(stored_file.file_id, "file_id", max_length=2048)
+            _validate_text(stored_file.file_unique_id, "file_unique_id", max_length=256)
+            _validate_file_size(stored_file.file_size_bytes)
+            if stored_file.file_size_bytes is None:
+                raise InvalidRecord("stored item file size must be known")
+            if stored_file.file_name is not None:
+                _validate_text(stored_file.file_name, "file_name", max_length=1024)
+            if stored_file.mime_type is not None:
+                _validate_text(stored_file.mime_type, "mime_type", max_length=256)
+        if item.files and (
+            len(item.files) != len(item.storage_messages)
+            or file_sequences != sequences
+        ):
+            raise InvalidRecord("item files and storage references must have matching sequences")
         now = item.created_at_ms if item.created_at_ms is not None else _now_ms()
         _require_time(now, "created_at_ms")
 
@@ -91,8 +124,8 @@ class ItemRepository:
                 cursor = await connection.execute(
                     """INSERT INTO items
                        (owner_user_id, media_type, file_size_bytes, file_name, mime_type,
-                        caption, protect_content, created_at_ms)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        caption, protect_content, created_at_ms, sha256)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         item.owner_user_id,
                         item.media_type,
@@ -102,6 +135,7 @@ class ItemRepository:
                         item.caption,
                         int(item.protect_content),
                         now,
+                        item.sha256,
                     ),
                 )
                 item_id = int(cursor.lastrowid)
@@ -112,9 +146,50 @@ class ItemRepository:
                            VALUES (?, ?, ?, ?)""",
                         (item_id, reference.chat_id, reference.message_id, reference.sequence),
                     )
+                inserted_fingerprints: set[str] = set()
+                for stored_file in item.files:
+                    await connection.execute(
+                        """INSERT INTO item_files
+                           (item_id, owner_user_id, sequence, media_type, file_id,
+                            file_unique_id, file_size_bytes, file_name, mime_type)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            item_id,
+                            item.owner_user_id,
+                            stored_file.sequence,
+                            stored_file.media_type,
+                            stored_file.file_id,
+                            stored_file.file_unique_id,
+                            stored_file.file_size_bytes,
+                            stored_file.file_name,
+                            stored_file.mime_type,
+                        ),
+                    )
+                    if stored_file.file_unique_id not in inserted_fingerprints:
+                        await connection.execute(
+                            """INSERT INTO item_file_fingerprints
+                               (owner_user_id, file_unique_id, item_id)
+                               VALUES (?, ?, ?)""",
+                            (item.owner_user_id, stored_file.file_unique_id, item_id),
+                        )
+                        inserted_fingerprints.add(stored_file.file_unique_id)
+                if clear_pending_upload_id is not None:
+                    _validate_text(
+                        clear_pending_upload_id,
+                        "pending_upload_id",
+                        max_length=128,
+                    )
+                    cursor = await connection.execute(
+                        "DELETE FROM pending_uploads WHERE upload_id = ?",
+                        (clear_pending_upload_id,),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RecordNotFound(
+                            "Pending upload disappeared before item commit"
+                        )
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
-            raise InvalidRecord("Item or storage-message data violates database constraints") from exc
+            raise InvalidRecord("Item or storage-file data violates database constraints") from exc
         return replace(item, id=item_id, created_at_ms=now)
 
     async def get(self, item_id: int) -> MediaItem | None:
@@ -133,6 +208,21 @@ class ItemRepository:
                 StorageMessageRef(int(ref["storage_chat_id"]), int(ref["storage_message_id"]), int(ref["sequence"]))
                 for ref in await cursor.fetchall()
             )
+            cursor = await connection.execute(
+                "SELECT * FROM item_files WHERE item_id = ? ORDER BY sequence", (item_id,)
+            )
+            files = tuple(
+                ItemFile(
+                    sequence=int(file_row["sequence"]),
+                    media_type=str(file_row["media_type"]),
+                    file_id=str(file_row["file_id"]),
+                    file_unique_id=str(file_row["file_unique_id"]),
+                    file_size_bytes=int(file_row["file_size_bytes"]),
+                    file_name=file_row["file_name"],
+                    mime_type=file_row["mime_type"],
+                )
+                for file_row in await cursor.fetchall()
+            )
         return MediaItem(
             owner_user_id=int(row["owner_user_id"]),
             media_type=str(row["media_type"]),
@@ -144,7 +234,24 @@ class ItemRepository:
             protect_content=bool(row["protect_content"]),
             id=int(row["id"]),
             created_at_ms=int(row["created_at_ms"]),
+            sha256=None if row["sha256"] is None else bytes(row["sha256"]),
+            files=files,
         )
+
+    async def find_item_id_by_file_unique_id(
+        self, owner_user_id: int, file_unique_id: str
+    ) -> int | None:
+        """Return this owner's stored item for a Telegram unique-file fingerprint."""
+        _require_positive_int(owner_user_id, "owner_user_id")
+        _validate_text(file_unique_id, "file_unique_id", max_length=256)
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                """SELECT item_id FROM item_file_fingerprints
+                   WHERE owner_user_id = ? AND file_unique_id = ?""",
+                (owner_user_id, file_unique_id),
+            )
+            row = await cursor.fetchone()
+        return None if row is None else int(row["item_id"])
 
 
 class ShareLinkRepository:
@@ -335,12 +442,14 @@ class PendingUploadRepository:
                     await connection.execute(
                         """INSERT INTO pending_uploads
                            (upload_id, owner_user_id, media_group_id, status, created_at_ms,
-                            last_seen_at_ms, settle_at_ms)
-                           VALUES (?, ?, ?, 'collecting', ?, ?, ?)""",
+                            last_seen_at_ms, settle_at_ms, pipeline)
+                           VALUES (?, ?, ?, 'collecting', ?, ?, ?, 'm2')""",
                         (upload_id, owner_user_id, media_group_id, message.received_at_ms, message.received_at_ms, settle_at_ms),
                     )
                 else:
                     upload_id = str(upload["upload_id"])
+                    if str(upload["pipeline"]) != "m2":
+                        raise InvalidTransition("Only M2 uploads can accept messages")
                     if upload["status"] != "collecting":
                         raise InvalidTransition("Only collecting uploads can accept new messages")
                     await connection.execute(
@@ -420,13 +529,20 @@ class PendingUploadRepository:
             messages = await _pending_messages(connection, upload_id)
         return _pending_upload_from_row(upload, messages)
 
-    async def list_recoverable(self) -> tuple[PendingUpload, ...]:
+    async def list_recoverable(
+        self, *, pipeline: str | None = None
+    ) -> tuple[PendingUpload, ...]:
+        if pipeline not in {None, "legacy", "m2"}:
+            raise InvalidRecord("pipeline must be legacy, m2, or None")
         async with self.database.connection() as connection:
-            cursor = await connection.execute(
-                """SELECT * FROM pending_uploads
-                   WHERE status IN ('collecting', 'ready', 'processing')
-                   ORDER BY settle_at_ms, created_at_ms"""
-            )
+            query = """SELECT * FROM pending_uploads
+                       WHERE status IN ('collecting', 'ready', 'processing')"""
+            parameters: tuple[str, ...] = ()
+            if pipeline is not None:
+                query += " AND pipeline = ?"
+                parameters = (pipeline,)
+            query += " ORDER BY settle_at_ms, created_at_ms"
+            cursor = await connection.execute(query, parameters)
             rows = await cursor.fetchall()
             uploads = []
             for row in rows:
@@ -479,6 +595,15 @@ class PendingUploadRepository:
         if result is None:
             raise RecordNotFound("Pending upload disappeared during transition")
         return result
+
+    async def delete(self, upload_id: str) -> bool:
+        """Remove a pending upload and its message rows after terminal handling."""
+        _validate_text(upload_id, "upload_id", max_length=128)
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM pending_uploads WHERE upload_id = ?", (upload_id,)
+            )
+            return cursor.rowcount == 1
 
 
 def _now_ms() -> int:
@@ -536,4 +661,5 @@ def _pending_upload_from_row(row: sqlite3.Row, messages: tuple[PendingUploadMess
         started_at_ms=None if row["started_at_ms"] is None else int(row["started_at_ms"]),
         finished_at_ms=None if row["finished_at_ms"] is None else int(row["finished_at_ms"]),
         error_code=row["error_code"],
+        pipeline=str(row["pipeline"]),
     )

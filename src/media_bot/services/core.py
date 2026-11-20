@@ -174,8 +174,14 @@ class PendingUploadService:
             raise RecordNotFound("Pending upload disappeared after recording a message")
         return PendingMessageReceipt(upload=upload, inserted=inserted)
 
-    async def list_recoverable(self) -> tuple[PendingUpload, ...]:
-        return await self.repository.list_recoverable()
+    async def list_recoverable(
+        self, *, pipeline: str | None = None
+    ) -> tuple[PendingUpload, ...]:
+        return await self.repository.list_recoverable(pipeline=pipeline)
+
+    async def delete(self, upload_id: str) -> bool:
+        """Remove a pending work record after completion or rejection."""
+        return await self.repository.delete(upload_id)
 
     async def transition(
         self,

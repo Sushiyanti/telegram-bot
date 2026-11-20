@@ -1,6 +1,6 @@
 # Telegram Private Media Storage Bot
 
-A private Telegram media-storage and access-control bot. Milestone 0 foundation and Milestone 1 persistence/core services are implemented, including the explicit configuration, identity, diagnostics, and authorization closure items. Upload and delivery handlers, membership enforcement, and share-link UI remain Milestone 2 work and are not included here.
+A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds the first private-DM media-ingestion flow. Delivery, membership enforcement, and share-link UI remain Milestone 3 work and are not included here.
 
 ## Runtime and dependencies
 
@@ -19,11 +19,19 @@ uv sync --locked --group dev
 cp .env.example .env
 ```
 
-Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). `DEFAULT_PROTECT_CONTENT=false` preserves normal recipient saving/forwarding behavior for a later delivery implementation.
+Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). `UPLOADER_MODE` defaults to `admin`; choose `allowlist` and set `UPLOADER_IDS` to comma-separated numeric IDs to admit an explicit list, or `all` to accept any private user. `UPLOADER_MODE=all` with `ENV=prod` emits a startup warning. `DEFAULT_PROTECT_CONTENT` is retained as a future recipient-copy preference; M2 does not pass it to storage copies.
 
 The bot can be started with either `uv run --locked --group dev python -m app` or `uv run --locked --group dev python -m media_bot`. Both entry points validate settings and initialize the database before polling. Missing or malformed settings produce a readable error that lists each invalid key. The token is never read from a tracked file; if a token is disclosed, revoke it through BotFather and replace it.
 
 `/whoami` reports the caller's numeric user ID and configuration-based admin status. Admin-only `/configcheck` reports sanitized PASS/FAIL checks for `getMe`, storage-channel reachability and administrator status, channel privacy, admin-ID parsing/count, database version/writability, and the configured maximum relay size. Configcheck tests use mocked Telegram calls; no live PASS run has been made because a test bot and private channel have not been provisioned.
+
+## M2 private media intake
+
+Permitted users can send a document, photo, video, audio file, voice message, animation, or video note to the bot in a private DM. The bot checks that Telegram supplied a file size, the file does not exceed `MAX_RELAY_FILE_BYTES`, and the source message is not protected before attempting a copy. Albums are buffered by private chat and Telegram media-group ID with a 1.5-second debounce. A single message uses `copyMessage`; an album uses one `copyMessages` call, and a returned-count mismatch prevents item metadata from being committed. Telegram-side copies cannot be rolled back, so a partial result can leave unreferenced storage messages. The bot does not download or re-upload media and does not call `getFile`.
+
+An accepted upload creates one item record, its storage-message references, and per-file metadata/fingerprint records. The item stores the aggregate byte count for an album; `sha256` remains `NULL`. A repeated `(uploader, file_unique_id)` is rejected before another copy. Confirmations include the item ID and size (and album message count), never a Telegram `file_id` or storage message ID. Rejections and storage-copy failures are written to `audit_log`; failures clear the M2 pending row. The M2 test suite mocks all Telegram methods. No live bot/channel integration has been run because a test bot, private storage channel, and authorized test user were not provisioned.
+
+`DEFAULT_PROTECT_CONTENT` continues to be stored on item metadata as the future recipient-copy preference. M2 explicitly passes `protect_content=False` for both storage-copy methods; the config value has no effect on storage copies. Decide and verify recipient-facing semantics before M3.
 
 ## Tests
 
@@ -31,11 +39,11 @@ The bot can be started with either `uv run --locked --group dev python -m app` o
 uv run --locked --group dev pytest
 ```
 
-Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin allow/deny behavior and audit records, `/whoami`, mocked configcheck pass/fail cases, SQLite migrations and constraints, repository persistence, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. They make no live Telegram calls.
+Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and uploader allow/deny behavior, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, SQLite migrations and constraints, repository persistence, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. They make no live Telegram calls.
 
 ## Persistence and share-link safety
 
-The versioned schema is in `src/media_bot/db/migrations/`. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Audit records have database triggers that reject update and delete operations.
+The versioned schema is in `src/media_bot/db/migrations/`. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Audit records have database triggers that reject update and delete operations.
 
 Items map to one or more private storage message references. Share links store only a SHA-256 digest of a cryptographically random bearer token, are non-expiring by default, and can be revoked. **The proposed seven-day TTL change was deferred by the user; no TTL default change has been applied.** File sizes are integer byte counts when Telegram provides them; an unknown size is stored as `NULL`. There is no hardcoded maximum file size in the schema.
 
@@ -82,6 +90,6 @@ Before enabling the service, add the bot to the private storage channel as an ad
 
 ## Current scope and next integration work
 
-Only diagnostic commands (`/whoami` and `/configcheck`) are implemented in addition to the original placeholder `/start`. Upload handlers, delivery, membership checks, share-link UI, and copyMessage integration remain out of scope; stop this closure work before Milestone 2.
+The implemented flow stops after storing an upload and confirming its item ID. Delivery, membership checks, share-link UI, and recipient `copyMessage` integration remain out of scope for M2 and are reserved for M3.
 
 Large-file limits are being investigated separately. The complete future integration test must upload each fixture through a Premium or ordinary user account to the bot, copy it into the private channel, persist the message reference, copy it to a test recipient, and verify a full download/checksum. Documented limits and experimental results will be kept distinct; no size is supported merely because a client displays it.

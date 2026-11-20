@@ -8,6 +8,19 @@ from media_bot.media_transfer import StorageMessageRef
 
 
 @dataclass(frozen=True, slots=True)
+class ItemFile:
+    """Source-file metadata retained for one member of a stored item."""
+
+    sequence: int
+    media_type: str
+    file_id: str
+    file_unique_id: str
+    file_size_bytes: int
+    file_name: str | None = None
+    mime_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MediaItem:
     """Metadata for one logical stored item; bytes remain in Telegram."""
 
@@ -21,6 +34,8 @@ class MediaItem:
     protect_content: bool = False
     id: int | None = None
     created_at_ms: int | None = None
+    sha256: bytes | None = None
+    files: tuple[ItemFile, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,3 +104,4 @@ class PendingUpload:
     started_at_ms: int | None = None
     finished_at_ms: int | None = None
     error_code: str | None = None
+    pipeline: str = "legacy"

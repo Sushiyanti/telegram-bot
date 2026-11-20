@@ -24,6 +24,8 @@ def test_settings_parse_required_values() -> None:
     assert settings.env == "dev"
     assert settings.max_relay_file_bytes == 2_147_483_648
     assert settings.default_protect_content is False
+    assert settings.uploader_mode == "admin"
+    assert settings.uploader_ids == ()
 
 
 def test_settings_parse_optional_content_protection() -> None:
@@ -43,6 +45,28 @@ def test_settings_parse_optional_content_protection() -> None:
     assert settings.env == "prod"
     assert settings.max_relay_file_bytes == 987654321
     assert settings.default_protect_content is True
+
+
+def test_settings_parse_uploader_allowlist() -> None:
+    settings = Settings.from_env(
+        {
+            **VALID_ENV,
+            "UPLOADER_MODE": "allowlist",
+            "UPLOADER_IDS": "123456789, 456789123",
+        }
+    )
+
+    assert settings.uploader_mode == "allowlist"
+    assert settings.uploader_ids == (123456789, 456789123)
+
+
+def test_irrelevant_uploader_ids_are_ignored_outside_allowlist_mode() -> None:
+    settings = Settings.from_env(
+        {**VALID_ENV, "UPLOADER_MODE": "all", "UPLOADER_IDS": "@ignored"}
+    )
+
+    assert settings.uploader_mode == "all"
+    assert settings.uploader_ids == ()
 
 
 @pytest.mark.parametrize(
@@ -70,11 +94,27 @@ def test_settings_parse_optional_content_protection() -> None:
         ("MAX_RELAY_FILE_BYTES", "0"),
         ("MAX_RELAY_FILE_BYTES", "9" * 5000),
         ("DEFAULT_PROTECT_CONTENT", "sometimes"),
+        ("UPLOADER_MODE", "some-users"),
     ],
 )
 def test_settings_reject_invalid_values(key: str, value: str) -> None:
     with pytest.raises(ConfigurationError, match=key):
         Settings.from_env({**VALID_ENV, key: value})
+
+
+@pytest.mark.parametrize(
+    "uploader_ids",
+    ["", "@someone", "1,word", "1,,2", "12,12", "9" * 5000],
+)
+def test_allowlist_mode_rejects_invalid_uploader_ids(uploader_ids: str) -> None:
+    with pytest.raises(ConfigurationError, match="UPLOADER_IDS"):
+        Settings.from_env(
+            {
+                **VALID_ENV,
+                "UPLOADER_MODE": "allowlist",
+                "UPLOADER_IDS": uploader_ids,
+            }
+        )
 
 
 def test_missing_required_values_are_all_listed() -> None:

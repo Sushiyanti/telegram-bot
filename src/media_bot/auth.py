@@ -10,6 +10,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from media_bot import config
+from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 
 
@@ -22,6 +23,17 @@ def is_admin(user_id: int) -> bool:
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         return False
     return user_id in config.ADMIN_IDS
+
+
+def can_upload(user_id: int, settings: Settings) -> bool:
+    """Return whether the user is permitted by the configured uploader mode."""
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        return False
+    if settings.uploader_mode == "all":
+        return True
+    if settings.uploader_mode == "allowlist":
+        return user_id in settings.uploader_ids
+    return user_id in settings.admin_ids
 
 
 def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:

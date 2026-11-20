@@ -3,10 +3,11 @@
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, MessageHandler
 
 from media_bot.application import build_application
 from media_bot.config import Settings
@@ -60,6 +61,23 @@ def test_application_builds_without_network_access(settings: Settings) -> None:
     assert commands == {"start", "whoami", "configcheck"}
     assert application.bot_data["settings"] is settings
     assert application.bot_data["database"].path == settings.db_path
+    assert application.bot_data["upload_handler"] is not None
+    assert any(
+        isinstance(handler, MessageHandler)
+        for handlers in application.handlers.values()
+        for handler in handlers
+    )
+
+
+def test_all_uploaders_in_production_emits_startup_warning(
+    settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    application_settings = replace(settings, uploader_mode="all", env="prod")
+
+    with caplog.at_level("WARNING"):
+        build_application(application_settings)
+
+    assert "UPLOADER_MODE=all" in caplog.text
 
 
 def test_python_m_app_fails_clearly_when_required_configuration_is_missing(

@@ -34,6 +34,8 @@ class Settings:
     env: str
     max_relay_file_bytes: int
     default_protect_content: bool
+    uploader_mode: str = "admin"
+    uploader_ids: tuple[int, ...] = ()
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -55,6 +57,16 @@ class Settings:
             source.get("STORAGE_CHANNEL_ID", ""), errors
         )
         admin_ids = _parse_admin_ids(source.get("ADMIN_IDS", ""), errors)
+
+        uploader_mode = source.get("UPLOADER_MODE", "admin").strip().lower()
+        if uploader_mode not in {"admin", "allowlist", "all"}:
+            errors.append("UPLOADER_MODE must be admin, allowlist, or all")
+            uploader_mode = "admin"
+        uploader_ids = (
+            _parse_uploader_ids(source.get("UPLOADER_IDS", ""), errors)
+            if uploader_mode == "allowlist"
+            else ()
+        )
 
         raw_db_path = source.get("DB_PATH", "./data/bot.db").strip()
         if not raw_db_path:
@@ -94,6 +106,8 @@ class Settings:
             env=env,
             max_relay_file_bytes=max_relay_file_bytes,
             default_protect_content=default_protect_content,
+            uploader_mode=uploader_mode,
+            uploader_ids=uploader_ids,
         )
 
 
@@ -131,6 +145,38 @@ def _parse_admin_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
         return ()
     if len(set(parsed)) != len(parsed):
         errors.append("ADMIN_IDS must not contain duplicate IDs")
+        return ()
+    return tuple(parsed)
+
+
+def _parse_uploader_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
+    if not raw_value.strip():
+        errors.append("UPLOADER_IDS must contain at least one numeric Telegram user ID when UPLOADER_MODE=allowlist")
+        return ()
+
+    parts = raw_value.split(",")
+    parsed: list[int] = []
+    invalid = False
+    for raw_part in parts:
+        part = raw_part.strip()
+        if (
+            not part
+            or not part.isascii()
+            or not part.isdecimal()
+            or len(part) > 19
+        ):
+            invalid = True
+            continue
+        user_id = int(part)
+        if user_id <= 0 or user_id > _MAX_SIGNED_64:
+            invalid = True
+            continue
+        parsed.append(user_id)
+    if invalid:
+        errors.append("UPLOADER_IDS entries must be positive numeric Telegram user IDs")
+        return ()
+    if len(set(parsed)) != len(parsed):
+        errors.append("UPLOADER_IDS must not contain duplicate IDs")
         return ()
     return tuple(parsed)
 
