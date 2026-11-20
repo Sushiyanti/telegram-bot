@@ -1,0 +1,41 @@
+"""Command-line entry point for the Telegram bot."""
+
+from __future__ import annotations
+
+import logging
+import sys
+
+from media_bot.application import build_application
+from media_bot.config import ConfigurationError, Settings
+from media_bot.logging_config import configure_logging
+from media_bot.startup import StartupPrerequisiteError, prepare_state_directory
+
+
+logger = logging.getLogger(__name__)
+
+
+def main() -> None:
+    """Validate local prerequisites and start the bot using long polling."""
+    try:
+        settings = Settings.from_env()
+    except ConfigurationError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    configure_logging(settings.log_level)
+    try:
+        prepare_state_directory(settings.database_path)
+    except StartupPrerequisiteError as exc:
+        logger.error("Startup prerequisite failed: %s", exc)
+        raise SystemExit(2) from exc
+
+    application = build_application(settings)
+    logger.info("Starting Telegram bot in long-polling mode")
+    application.run_polling(
+        allowed_updates=["message", "callback_query"],
+        drop_pending_updates=False,
+    )
+
+
+if __name__ == "__main__":
+    main()

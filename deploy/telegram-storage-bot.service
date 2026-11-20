@@ -1,0 +1,26 @@
+[Unit]
+Description=Telegram Private Media Storage Bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=telegrambot
+Group=telegrambot
+WorkingDirectory=/opt/telegram-storage-bot
+EnvironmentFile=/etc/telegram-storage-bot.env
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=telegram-storage-bot
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/opt/telegram-storage-bot/.venv/bin/python -m media_bot
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/telegram-storage-bot
+
+[Install]
+WantedBy=multi-user.target
