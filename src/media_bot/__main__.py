@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 
 from media_bot.application import build_application
 from media_bot.config import ConfigurationError, Settings
+from media_bot.db.database import Database, DatabaseError
 from media_bot.logging_config import configure_logging
 from media_bot.startup import StartupPrerequisiteError, prepare_state_directory
 
@@ -27,6 +29,16 @@ def main() -> None:
         prepare_state_directory(settings.database_path)
     except StartupPrerequisiteError as exc:
         logger.error("Startup prerequisite failed: %s", exc)
+        raise SystemExit(2) from exc
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(Database(settings.database_path).initialize())
+    except DatabaseError as exc:
+        logger.error("Database initialization failed: %s", exc)
+        loop.close()
+        asyncio.set_event_loop(None)
         raise SystemExit(2) from exc
 
     application = build_application(settings)
