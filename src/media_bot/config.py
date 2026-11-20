@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from dotenv import find_dotenv, load_dotenv
+
 
 class ConfigurationError(ValueError):
-    """Raised when required runtime settings are missing or invalid."""
+    """Raised when runtime settings are missing or invalid."""
+
+
+# Populated from validated Settings during application construction. Authorization
+# reads this configuration value directly and never queries the database.
+ADMIN_IDS: frozenset[int] = frozenset()
+_MIN_SIGNED_64 = -(1 << 63)
+_MAX_SIGNED_64 = (1 << 63) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,48 +27,55 @@ class Settings:
     """Validated application settings."""
 
     bot_token: str
+    storage_channel_id: int
     admin_ids: tuple[int, ...]
-    storage_chat_id: int
-    database_path: Path
+    db_path: Path
     log_level: str
+    env: str
+    max_relay_file_bytes: int
     default_protect_content: bool
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
-        """Parse and validate settings from a mapping or the process environment."""
-        source = os.environ if environ is None else environ
-        errors: list[str] = []
+        """Parse settings from a mapping or the process environment and ``.env``."""
+        if environ is None:
+            load_dotenv(find_dotenv(usecwd=True), override=False)
+            source: Mapping[str, str] = os.environ
+        else:
+            source = environ
 
+        errors: list[str] = []
         bot_token = source.get("BOT_TOKEN", "").strip()
-        token_prefix, separator, token_secret = bot_token.partition(":")
         if not bot_token:
             errors.append("BOT_TOKEN is required")
-        elif (
-            not separator
-            or not token_prefix.isdecimal()
-            or not token_secret
-            or ":" in token_secret
-        ):
+        elif re.fullmatch(r"[0-9]+:[^:\s]+", bot_token) is None:
             errors.append("BOT_TOKEN must have the BotFather token format")
 
-        admin_ids = _parse_admin_ids(source.get("ADMIN_IDS", ""), errors)
-        storage_chat_id = _parse_storage_chat_id(
-            source.get("STORAGE_CHAT_ID", ""), errors
+        storage_channel_id = _parse_storage_channel_id(
+            source.get("STORAGE_CHANNEL_ID", ""), errors
         )
+        admin_ids = _parse_admin_ids(source.get("ADMIN_IDS", ""), errors)
 
-        raw_path = source.get(
-            "DATABASE_PATH", "/var/lib/telegram-storage-bot/bot.sqlite3"
-        ).strip()
-        if not raw_path:
-            errors.append("DATABASE_PATH cannot be empty")
-            database_path = Path("/var/lib/telegram-storage-bot/bot.sqlite3")
+        raw_db_path = source.get("DB_PATH", "./data/bot.db").strip()
+        if not raw_db_path:
+            errors.append("DB_PATH cannot be empty")
+            db_path = Path("./data/bot.db")
         else:
-            database_path = Path(raw_path).expanduser()
+            db_path = Path(raw_db_path).expanduser()
 
         log_level = source.get("LOG_LEVEL", "INFO").strip().upper()
-        allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        if log_level not in allowed_log_levels:
+        if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             errors.append("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+
+        env = source.get("ENV", "dev").strip().lower()
+        if env not in {"dev", "prod"}:
+            errors.append("ENV must be dev or prod")
+
+        max_relay_file_bytes = _parse_positive_int(
+            source.get("MAX_RELAY_FILE_BYTES", "2147483648"),
+            "MAX_RELAY_FILE_BYTES",
+            errors,
+        )
 
         raw_protect_content = source.get("DEFAULT_PROTECT_CONTENT", "false").strip().lower()
         if raw_protect_content not in {"true", "false"}:
@@ -70,44 +87,77 @@ class Settings:
 
         return cls(
             bot_token=bot_token,
+            storage_channel_id=storage_channel_id,
             admin_ids=admin_ids,
-            storage_chat_id=storage_chat_id,
-            database_path=database_path,
+            db_path=db_path,
             log_level=log_level,
+            env=env,
+            max_relay_file_bytes=max_relay_file_bytes,
             default_protect_content=default_protect_content,
         )
 
 
+def configure_admin_ids(admin_ids: tuple[int, ...] | frozenset[int]) -> None:
+    """Install validated admin IDs for fast, database-independent authorization."""
+    global ADMIN_IDS
+    ADMIN_IDS = frozenset(admin_ids)
+
+
 def _parse_admin_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
-    parts = [part.strip() for part in raw_value.split(",") if part.strip()]
-    if not parts:
+    if not raw_value.strip():
         errors.append("ADMIN_IDS must contain at least one numeric Telegram user ID")
         return ()
 
+    parts = raw_value.split(",")
     parsed: list[int] = []
-    for part in parts:
-        if not part.isdecimal() or int(part) <= 0:
-            errors.append("ADMIN_IDS must contain only positive numeric Telegram user IDs")
-            return ()
-        parsed.append(int(part))
-
+    invalid = False
+    for raw_part in parts:
+        part = raw_part.strip()
+        if (
+            not part
+            or not part.isascii()
+            or not part.isdecimal()
+            or len(part) > 19
+        ):
+            invalid = True
+            continue
+        user_id = int(part)
+        if user_id <= 0 or user_id > _MAX_SIGNED_64:
+            invalid = True
+            continue
+        parsed.append(user_id)
+    if invalid:
+        errors.append("ADMIN_IDS entries must be positive numeric Telegram user IDs")
+        return ()
     if len(set(parsed)) != len(parsed):
         errors.append("ADMIN_IDS must not contain duplicate IDs")
         return ()
     return tuple(parsed)
 
 
-def _parse_storage_chat_id(raw_value: str, errors: list[str]) -> int:
+def _parse_storage_channel_id(raw_value: str, errors: list[str]) -> int:
     value = raw_value.strip()
     if not value:
-        errors.append("STORAGE_CHAT_ID is required")
+        errors.append("STORAGE_CHANNEL_ID is required")
         return 0
-    try:
-        chat_id = int(value)
-    except ValueError:
-        errors.append("STORAGE_CHAT_ID must be a numeric Telegram chat ID")
+    digits = value.lstrip("+-")
+    if re.fullmatch(r"[+-]?[0-9]+", value) is None or len(digits) > 19:
+        errors.append("STORAGE_CHANNEL_ID must be an integer Telegram channel ID")
         return 0
-    if chat_id == 0:
-        errors.append("STORAGE_CHAT_ID cannot be zero")
+    channel_id = int(value)
+    if channel_id == 0 or not (_MIN_SIGNED_64 <= channel_id <= _MAX_SIGNED_64):
+        errors.append("STORAGE_CHANNEL_ID must fit a non-zero signed 64-bit integer")
         return 0
-    return chat_id
+    return channel_id
+
+
+def _parse_positive_int(raw_value: str, field: str, errors: list[str]) -> int:
+    value = raw_value.strip()
+    if re.fullmatch(r"[0-9]+", value) is None or len(value) > 19:
+        errors.append(f"{field} must be a positive integer")
+        return 0
+    parsed = int(value)
+    if parsed <= 0 or parsed > _MAX_SIGNED_64:
+        errors.append(f"{field} must be a positive integer")
+        return 0
+    return parsed

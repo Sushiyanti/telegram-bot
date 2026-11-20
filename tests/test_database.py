@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 from pathlib import Path
+import secrets
+from unittest.mock import patch
 
 import aiosqlite
 import pytest
@@ -60,7 +62,7 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
         tables = await (await connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )).fetchall()
-    assert version[0] == 1
+    assert version[0] == 2
     assert journal[0].lower() == "wal"
     assert foreign_keys[0] == 1
     assert timeout[0] == 2300
@@ -71,6 +73,7 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
         "required_chats",
         "pending_uploads",
         "pending_upload_messages",
+        "audit_log",
     }
     assert db.path.stat().st_mode & 0o777 == 0o600
 
@@ -83,8 +86,27 @@ async def test_migration_repeatability_is_idempotent(database: Database) -> None
         indexes = await (await connection.execute(
             "SELECT name FROM sqlite_master WHERE type='index'"
         )).fetchall()
-    assert version[0] == 1
+    assert version[0] == 2
     assert len([row[0] for row in indexes if row[0] == "share_links_by_item_id"]) == 1
+
+
+async def test_version_one_database_applies_audit_migration(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-v1.db"
+    migration = Path(__file__).resolve().parents[1] / "src/media_bot/db/migrations/0001_initial.sql"
+    async with aiosqlite.connect(path) as connection:
+        await connection.executescript(migration.read_text(encoding="utf-8"))
+        await connection.commit()
+
+    database = Database(path)
+    await database.initialize()
+
+    async with database.connection() as connection:
+        version = await (await connection.execute("PRAGMA user_version")).fetchone()
+        tables = await (await connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )).fetchall()
+    assert version[0] == 2
+    assert "audit_log" in {row[0] for row in tables}
 
 
 async def test_foreign_key_enforcement_rejects_missing_item(database: Database) -> None:
@@ -275,6 +297,38 @@ async def test_share_link_creation_hashing_lookup_and_revocation(database: Datab
     assert rows[0]["token_hash"] == hash_share_token(created.token)
     assert created.token.encode() not in rows[0]["token_hash"]
     assert hash_share_token(created.token) != created.token.encode()
+
+
+async def test_share_link_default_is_non_expiring(database: Database) -> None:
+    items = ItemRepository(database)
+    item = await items.create_stored_item(make_item())
+    service = ShareLinkService(
+        ShareLinkRepository(database),
+        items,
+        TransferCapabilities(verified_max_file_size_bytes=1_000),
+    )
+
+    created = await service.create(item_id=item.id, created_by_user_id=123456789)
+
+    assert created.link.expires_at_ms is None
+
+
+async def test_share_token_generation_uses_at_least_256_bits(database: Database) -> None:
+    items = ItemRepository(database)
+    item = await items.create_stored_item(make_item())
+    service = ShareLinkService(
+        ShareLinkRepository(database),
+        items,
+        TransferCapabilities(verified_max_file_size_bytes=1_000),
+    )
+    with patch(
+        "media_bot.services.core.secrets.token_urlsafe",
+        wraps=secrets.token_urlsafe,
+    ) as token_urlsafe:
+        created = await service.create(item_id=item.id, created_by_user_id=123456789)
+
+    token_urlsafe.assert_called_once_with(32)
+    assert len(created.token) >= 43
 
 
 async def test_multiple_links_may_reference_same_item(database: Database) -> None:

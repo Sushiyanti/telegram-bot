@@ -112,6 +112,29 @@ class Database:
         except (OSError, sqlite3.Error, aiosqlite.Error) as exc:
             raise DatabaseError("Could not initialize the SQLite database") from exc
 
+    @classmethod
+    def latest_schema_version(cls) -> int:
+        """Return the newest contiguous schema version packaged with this build."""
+        migrations = cls._load_migrations()
+        return migrations[-1][0] if migrations else 0
+
+    async def health_check(self) -> tuple[int, bool]:
+        """Read schema version and probe write access without persistent changes."""
+        async with self.connection() as connection:
+            cursor = await connection.execute("PRAGMA user_version")
+            row = await cursor.fetchone()
+            version = int(row[0]) if row is not None else 0
+            writable = False
+            try:
+                await connection.execute("BEGIN IMMEDIATE")
+                await connection.execute(f"PRAGMA user_version = {version}")
+                await connection.rollback()
+                writable = True
+            except (sqlite3.Error, aiosqlite.Error):
+                if connection.in_transaction:
+                    await connection.rollback()
+            return version, writable
+
     @staticmethod
     def _load_migrations() -> list[tuple[int, str]]:
         migration_package = files("media_bot.db.migrations")

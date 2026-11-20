@@ -13,7 +13,7 @@ class StartupPrerequisiteError(RuntimeError):
 def prepare_state_directory(database_path: Path) -> None:
     """Create the database parent directory and verify it is writable."""
     if database_path.exists() and not database_path.is_file():
-        raise StartupPrerequisiteError("DATABASE_PATH exists but is not a file")
+        raise StartupPrerequisiteError("DB_PATH exists but is not a file")
 
     state_directory = database_path.parent
     try:

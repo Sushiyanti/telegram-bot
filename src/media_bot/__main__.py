@@ -26,7 +26,7 @@ def main() -> None:
 
     configure_logging(settings.log_level)
     try:
-        prepare_state_directory(settings.database_path)
+        prepare_state_directory(settings.db_path)
     except StartupPrerequisiteError as exc:
         logger.error("Startup prerequisite failed: %s", exc)
         raise SystemExit(2) from exc
@@ -34,7 +34,7 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(Database(settings.database_path).initialize())
+        loop.run_until_complete(Database(settings.db_path).initialize())
     except DatabaseError as exc:
         logger.error("Database initialization failed: %s", exc)
         loop.close()

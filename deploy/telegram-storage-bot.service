@@ -13,7 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 StateDirectory=telegram-storage-bot
 StateDirectoryMode=0700
 UMask=0077
-ExecStart=/opt/telegram-storage-bot/.venv/bin/python -m media_bot
+ExecStart=/opt/telegram-storage-bot/.venv/bin/python -m app
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

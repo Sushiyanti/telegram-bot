@@ -1,5 +1,6 @@
 """SQLite persistence for bot metadata and references."""
 
+from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database, DatabaseError, MigrationError
 from media_bot.db.models import (
     CreatedShareLink,
@@ -19,6 +20,7 @@ from media_bot.db.repositories import (
 )
 
 __all__ = [
+    "AuditLogRepository",
     "CreatedShareLink",
     "Database",
     "DatabaseError",
