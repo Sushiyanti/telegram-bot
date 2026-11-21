@@ -12,7 +12,7 @@ from media_bot.db.repositories import UploaderRepository
 from media_bot.db.rules import BotSettingsRepository
 
 logger = logging.getLogger(__name__)
-_ALLOWED_COMMANDS = {"start", "redeem"}
+_ALLOWED_COMMANDS = {"start"}
 _MEDIA_FIELDS = (
     "document", "photo", "video", "audio", "voice", "animation", "video_note"
 )

@@ -68,8 +68,6 @@ class RequirementEvaluator:
 
         if requirement.type == "REACT":
             last_x_messages = int(settings.get("last_x_messages", 5))
-            if last_x_messages == 0:
-                return True
             channel_id = int(requirement.target)
             try:
                 bot_id = getattr(bot, "id", None)

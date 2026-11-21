@@ -501,22 +501,31 @@ class ReactionRepository:
         _chat_id(channel_id, "channel_id")
         _bounded_int(last_x_messages, 0, _MAX_LAST_MESSAGES, "last_x_messages")
         _bounded_int(last_x_days, 0, _MAX_LAST_DAYS, "last_x_days")
-        if last_x_messages == 0:
-            return True
         now = _now_ms() if now_ms is None else now_ms
         _nonnegative_int(now, "now_ms")
         since_ms = 0 if last_x_days == 0 else now - last_x_days * 86_400_000
         async with self.database.connection() as connection:
-            cursor = await connection.execute(
-                """SELECT 1 FROM user_reactions AS reactions
-                   JOIN (
-                       SELECT message_id FROM observed_channel_posts
-                       WHERE channel_id = ? AND posted_at_ms >= ?
-                       ORDER BY posted_at_ms DESC, message_id DESC LIMIT ?
-                   ) AS recent ON recent.message_id = reactions.message_id
-                   WHERE reactions.user_id = ? AND reactions.channel_id = ? LIMIT 1""",
-                (channel_id, since_ms, last_x_messages, user_id, channel_id),
-            )
+            if last_x_messages == 0:
+                cursor = await connection.execute(
+                    """SELECT 1 FROM user_reactions AS reactions
+                       JOIN observed_channel_posts AS posts
+                         ON posts.channel_id = reactions.channel_id
+                        AND posts.message_id = reactions.message_id
+                       WHERE posts.channel_id = ? AND posts.posted_at_ms >= ?
+                         AND reactions.user_id = ? LIMIT 1""",
+                    (channel_id, since_ms, user_id),
+                )
+            else:
+                cursor = await connection.execute(
+                    """SELECT 1 FROM user_reactions AS reactions
+                       JOIN (
+                           SELECT message_id FROM observed_channel_posts
+                           WHERE channel_id = ? AND posted_at_ms >= ?
+                           ORDER BY posted_at_ms DESC, message_id DESC LIMIT ?
+                       ) AS recent ON recent.message_id = reactions.message_id
+                       WHERE reactions.user_id = ? AND reactions.channel_id = ? LIMIT 1""",
+                    (channel_id, since_ms, last_x_messages, user_id, channel_id),
+                )
             return await cursor.fetchone() is not None
 
 

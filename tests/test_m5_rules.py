@@ -529,6 +529,47 @@ async def test_start_real_react_without_database_reaction_refuses_delivery(datab
     assert "React to at least one recent post" in message.reply_text.await_args.args[0]
 
 
+@pytest.mark.parametrize("has_reaction", [False, True])
+async def test_start_real_react_with_no_message_limit_still_requires_any_observed_reaction(
+    database: Database, has_reaction: bool
+) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="REACT",
+        target=REACT_CHANNEL,
+        is_fake=False,
+        wait_seconds=0,
+        last_x_messages=0,
+        last_x_days=0,
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    reactions = ReactionRepository(database)
+    await reactions.observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
+    if has_reaction:
+        await reactions.replace_user_message_reactions(
+            user_id=USER_ID,
+            channel_id=REACT_CHANNEL,
+            message_id=701,
+            emojis=("👍",),
+            updated_at_ms=now_ms,
+        )
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    bot = bot_stub(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")))
+    context, bot = start_context(database, token, bot)
+
+    await start_command(update, context)
+
+    if has_reaction:
+        bot.copy_message.assert_awaited_once()
+        assert (await ShareLinkRepository(database).list_for_item(item.id))[0].use_count == 1
+    else:
+        bot.copy_message.assert_not_awaited()
+        assert (await ShareLinkRepository(database).list_for_item(item.id))[0].use_count == 0
+        assert "React to at least one recent post" in message.reply_text.await_args.args[0]
+
+
 async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(database: Database) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
@@ -636,7 +677,7 @@ async def test_react_verification_requires_one_of_last_n_observed_posts(database
     )
 
 
-async def test_togglecommands_and_policy_lock_regular_commands_but_allow_start_redeem(database: Database) -> None:
+async def test_togglecommands_and_policy_lock_regular_commands_but_allow_only_start(database: Database) -> None:
     configure_admin_ids((ADMIN_ID,))
     assert await BotSettingsRepository(database).user_commands_enabled()
     assert await BotSettingsRepository(database).toggle_user_commands() is False
@@ -654,13 +695,20 @@ async def test_togglecommands_and_policy_lock_regular_commands_but_allow_start_r
         await enforce_user_command_policy(disallowed, context())
     disallowed.effective_message.reply_text.assert_awaited_once_with("Commands are currently locked.")
 
-    for command in ("/start token", "/redeem code"):
-        allowed = SimpleNamespace(
-            effective_user=SimpleNamespace(id=USER_ID),
-            effective_message=SimpleNamespace(text=command, reply_text=AsyncMock()),
-        )
-        await enforce_user_command_policy(allowed, context())
-        allowed.effective_message.reply_text.assert_not_awaited()
+    allowed = SimpleNamespace(
+        effective_user=SimpleNamespace(id=USER_ID),
+        effective_message=SimpleNamespace(text="/start token", reply_text=AsyncMock()),
+    )
+    await enforce_user_command_policy(allowed, context())
+    allowed.effective_message.reply_text.assert_not_awaited()
+
+    redeem = SimpleNamespace(
+        effective_user=SimpleNamespace(id=USER_ID),
+        effective_message=SimpleNamespace(text="/redeem code", reply_text=AsyncMock()),
+    )
+    with pytest.raises(ApplicationHandlerStop):
+        await enforce_user_command_policy(redeem, context())
+    redeem.effective_message.reply_text.assert_awaited_once_with("Commands are currently locked.")
 
 
 async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) -> None:
@@ -683,6 +731,12 @@ async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) 
     admin_update.effective_message.reply_text.assert_not_awaited()
 
     await UploaderRepository(database).add(user_id=USER_ID, added_by=ADMIN_ID)
+    uploader_command = SimpleNamespace(
+        effective_user=SimpleNamespace(id=USER_ID),
+        effective_message=SimpleNamespace(text="/share 2", reply_text=AsyncMock()),
+    )
+    await enforce_user_command_policy(uploader_command, context)
+    uploader_command.effective_message.reply_text.assert_not_awaited()
     uploader_update = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
         effective_message=SimpleNamespace(photo=[object()], reply_text=AsyncMock()),

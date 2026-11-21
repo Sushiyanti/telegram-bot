@@ -34,6 +34,7 @@ from media_bot.handlers.panel import (
     admin_panel_callback,
     admin_panel_command,
     admin_panel_input,
+    expire_panel_flow_before_command,
 )
 from media_bot.handlers.reactions import ReactionUpdateHandler
 from media_bot.handlers.sharing import (
@@ -84,6 +85,9 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["upload_handler"] = upload_handler
     application.bot_data["reaction_update_handler"] = ReactionUpdateHandler(database)
 
+    application.add_handler(
+        TypeHandler(Update, expire_panel_flow_before_command), group=-2
+    )
     application.add_handler(TypeHandler(Update, enforce_user_command_policy), group=-1)
 
     application.add_handler(CommandHandler("start", start_command))

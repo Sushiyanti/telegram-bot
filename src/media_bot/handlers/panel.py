@@ -68,10 +68,38 @@ def _expire_pending_flow(state: dict[str, Any]) -> bool:
     ):
         state.update({"input": None, "wizard": None, "view": "home", "closed": False})
         state["nonce"] = secrets.token_hex(4)
+        state.pop("category_draft_name", None)
         state.pop("pending_last_activity", None)
         return True
     state["pending_last_activity"] = now
     return False
+
+
+async def expire_panel_flow_before_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Expire an idle private-panel flow before a command is routed normally."""
+    user = update.effective_user
+    message = update.effective_message
+    chat = update.effective_chat
+    state = _panel(context)
+    text = getattr(message, "text", None)
+    if (
+        user is None
+        or message is None
+        or chat is None
+        or getattr(chat, "type", None) != "private"
+        or not isinstance(text, str)
+        or not text.startswith("/")
+        or state is None
+        or int(state.get("owner_user_id", 0)) != int(user.id)
+        or int(state.get("chat_id", 0)) != int(chat.id)
+    ):
+        return
+    if _expire_pending_flow(state):
+        await _edit_panel(
+            context, state, "Admin Control Panel", _home_markup(state)
+        )
 
 
 def _callback(state: dict[str, Any], action: str, *values: object) -> str:
@@ -98,7 +126,7 @@ def _home_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
 
 
 async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Open or reuse this admin's one private panel message."""
+    """Open a fresh private panel and deactivate any earlier panel message."""
     user = update.effective_user
     message = update.effective_message
     chat = update.effective_chat
@@ -109,24 +137,23 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text("Not authorized.")
         return
 
-    state = _panel(context)
-    if state is not None and int(state.get("chat_id", 0)) == int(chat.id):
-        state.update({
+    previous = _panel(context)
+    if previous is not None and int(previous.get("chat_id", 0)) == int(chat.id):
+        previous.update({
             "nonce": secrets.token_hex(4),
-            "owner_user_id": int(user.id),
-            "view": "home",
-            "closed": False,
-            "input": None,
-            "wizard": None,
+            "view": "closed",
+            "closed": True,
         })
-        _touch_pending_flow(state)
-        await _edit_panel(
-            context,
-            state,
-            "Admin Control Panel",
-            _home_markup(state),
-        )
-        return
+        _clear_pending_flow(previous)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=int(previous["chat_id"]),
+                message_id=int(previous["message_id"]),
+                text="This panel was replaced by a newer /admin command.",
+                reply_markup=None,
+            )
+        except Exception as exc:
+            logger.info("previous_admin_panel_deactivate_failed (%s)", type(exc).__name__)
 
     state = {
         "nonce": secrets.token_hex(4),
@@ -138,7 +165,6 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "input": None,
         "wizard": None,
     }
-    context.user_data[_PANEL_KEY] = state
     try:
         sent = await context.bot.send_message(
             chat_id=int(chat.id),
@@ -146,10 +172,10 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=_home_markup(state),
         )
     except Exception as exc:
-        context.user_data.pop(_PANEL_KEY, None)
         logger.warning("admin_panel_send_failed (%s)", type(exc).__name__)
         return
     state["message_id"] = int(sent.message_id)
+    context.user_data[_PANEL_KEY] = state
 
 
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -268,6 +294,80 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         state["input"] = None
         raise ApplicationHandlerStop
 
+    if pending.get("kind") == "category_name":
+        name = getattr(message, "text", None)
+        name = name.strip() if isinstance(name, str) else ""
+        if not name or len(name) > 80 or name.casefold() == "global":
+            await _edit_panel(
+                context,
+                state,
+                "Send a non-empty category name of at most 80 characters. The name Global is reserved.",
+                _input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        existing = await CategoryRepository(_database(context)).get_by_name(name)
+        if existing is not None:
+            await _edit_panel(
+                context,
+                state,
+                "That category name already exists. Send a different category name.",
+                _input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        state["category_draft_name"] = name
+        state["input"] = {"kind": "category_storage"}
+        state["view"] = "input_category_storage"
+        _touch_pending_flow(state)
+        await _edit_panel(
+            context,
+            state,
+            f"Forward a message from the storage channel for {name}, or send its numeric chat ID. "
+            "The bot needs administrator permission to post there.",
+            _input_markup(state),
+        )
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "category_storage":
+        target = _forwarded_storage_chat_id(message)
+        if target is None and not _is_forwarded_message(message):
+            target = _parse_rule_target(getattr(message, "text", None), "JOIN_CHAT")
+        if target is None:
+            await _edit_panel(
+                context,
+                state,
+                "I couldn't find a storage-channel ID. Forward a message from that channel or send a numeric chat ID.",
+                _input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        name = state.get("category_draft_name")
+        try:
+            category = await CategoryRepository(_database(context)).create(str(name), target)
+        except (InvalidRecord, RecordNotFound, ValueError) as exc:
+            await _edit_panel(
+                context,
+                state,
+                f"Could not create the category: {exc}. Send a different storage-channel ID or forward its message.",
+                _input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        actor_id = int(user.id)
+        await _audit(
+            _database(context),
+            actor_id,
+            "category_created",
+            str(category.id),
+            target_type="category",
+        )
+        state.pop("category_draft_name", None)
+        _clear_pending_flow(state)
+        await _show_categories(
+            context,
+            state,
+            int(state.get("page", 0)),
+            notice=f"Category {category.name} created. Ensure the bot can post in its storage channel.",
+        )
+        raise ApplicationHandlerStop
+
     if pending.get("kind") == "rule_target":
         wizard = state.get("wizard")
         if not isinstance(wizard, dict):
@@ -306,6 +406,7 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 def _clear_pending_flow(state: dict[str, Any]) -> None:
     state["input"] = None
     state["wizard"] = None
+    state.pop("category_draft_name", None)
     state.pop("pending_last_activity", None)
 
 
@@ -354,6 +455,20 @@ def _forwarded_target_id(message: Any, requirement_type: str) -> int | None:
             return None
         candidate = getattr(forwarded_user, "id", None)
         return candidate if _valid_user_id(candidate) else None
+    return None
+
+
+def _forwarded_storage_chat_id(message: Any) -> int | None:
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        if getattr(origin, "type", None) not in {"channel", "chat"}:
+            return None
+        candidate = getattr(getattr(origin, "chat", None), "id", None)
+        return candidate if _valid_chat_id(candidate) else None
+    forwarded_chat = getattr(message, "forward_from_chat", None)
+    if forwarded_chat is not None:
+        candidate = getattr(forwarded_chat, "id", None)
+        return candidate if _valid_chat_id(candidate) else None
     return None
 
 
@@ -418,6 +533,8 @@ async def _dispatch_callback(
         await _show_categories(context, state, _int_arg(args, 0, 0), query=query)
     elif action == "catpage":
         await _show_categories(context, state, _int_arg(args, 0), query=query)
+    elif action == "catadd":
+        await _start_category_input(context, state, query=query)
     elif action == "cat":
         await _show_category(context, state, _int_arg(args, 0), query=query)
     elif action == "catlink":
@@ -506,8 +623,12 @@ async def _dispatch_callback(
     elif action == "unlock":
         await _set_lockdown(context, state, False, query=query)
     elif action == "inputcancel":
+        was_category_input = str(state.get("view", "")).startswith("input_category_")
+        state.pop("category_draft_name", None)
         _clear_pending_flow(state)
-        if state.get("view") == "input_staff_admin":
+        if was_category_input:
+            await _show_categories(context, state, int(state.get("page", 0)), query=query, notice="Category creation cancelled.")
+        elif state.get("view") == "input_staff_admin":
             await _show_staff(context, state, "admins", int(state.get("page", 0)), query=query)
         elif state.get("view") == "input_staff_uploader":
             await _show_staff(context, state, "uploaders", int(state.get("page", 0)), query=query)
@@ -545,6 +666,7 @@ async def _show_categories(
     rows = [[_button(category.name[:64], state, "cat", category.id)] for category in visible]
     if pages > 1:
         rows.append(_page_row(state, "catpage", page, pages))
+    rows.append([_button("Add Category", state, "catadd")])
     rows.append([_button("Main Menu", state, "home")])
     text = f"Categories — {page + 1}/{pages}"
     if notice:
@@ -552,6 +674,28 @@ async def _show_categories(
     if not visible:
         text += "\nNo categories found."
     await _edit_panel(context, state, text, _markup(rows), query=query)
+
+
+async def _start_category_input(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    state.pop("category_draft_name", None)
+    state.update({
+        "view": "input_category_name",
+        "input": {"kind": "category_name"},
+        "wizard": None,
+    })
+    _touch_pending_flow(state)
+    await _edit_panel(
+        context,
+        state,
+        "Send a category name (up to 80 characters). You will then choose its storage channel.",
+        _input_markup(state),
+        query=query,
+    )
 
 
 async def _show_category(
@@ -657,7 +801,7 @@ async def _show_category_delete(
     await _edit_panel(
         context,
         state,
-        f"Delete {category.name}? Its items will move to Default. Choose what to do with orphaned requirements.",
+        f"Delete {category.name}? Its items will move to Default. Parent/child links to this category will be removed, but linked categories themselves will remain. Choose whether to delete or keep requirements that become orphaned.",
         _markup(rows),
         query=query,
     )
@@ -808,8 +952,9 @@ async def _select_rule_type(
     wizard.update({"type": rule_type, "step": "target"})
     if rule_type == "TIMED_WAIT":
         wizard["target"] = None
+        wizard["is_fake"] = True
         state["input"] = None
-        await _show_rule_verification(context, state, query=query)
+        await _show_rule_wait(context, state, query=query)
         return
     state.update({"view": "rule_wizard_target", "input": {"kind": "rule_target"}})
     _touch_pending_flow(state)
@@ -940,9 +1085,9 @@ async def _show_react_windows(
     messages = (0, 3, 5, 10, 20, 50, 100)
     days = (0, 1, 7, 30, 90)
     rows = [
-        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}Messages {value}",
+        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}{'No message limit' if value == 0 else f'Last {value} posts'}",
                  state, "rule_message_window", value) for value in messages[:4]],
-        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}Messages {value}",
+        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}{'No message limit' if value == 0 else f'Last {value} posts'}",
                  state, "rule_message_window", value) for value in messages[4:]],
         [_button(f"{'✓ ' if wizard['last_x_days'] == value else ''}Days {value}",
                  state, "rule_day_window", value) for value in days],
@@ -952,7 +1097,7 @@ async def _show_react_windows(
     await _edit_panel(
         context,
         state,
-        "Choose the REACT window. A zero value disables that limit.",
+        "Require at least one observed reaction. Set No message limit and/or Days 0 to disable that bound.",
         _markup(rows),
         query=query,
     )
@@ -985,7 +1130,10 @@ async def _show_rule_confirmation(
     wizard = _require_rule_wizard(state)
     rule_type = str(wizard.get("type"))
     target = wizard.get("target")
-    verification = "Fake (wait only)" if wizard.get("is_fake") else "Real"
+    if rule_type == "TIMED_WAIT":
+        verification = "Wait only (no eligibility check)"
+    else:
+        verification = "Fake (wait only)" if wizard.get("is_fake") else "Real"
     lines = [
         "Confirm rule",
         f"Type: {rule_type}",
@@ -994,9 +1142,16 @@ async def _show_rule_confirmation(
         f"Wait: {wizard.get('wait_seconds', 0)} seconds",
     ]
     if rule_type == "REACT":
+        message_window = (
+            "any observed post" if int(wizard.get("last_x_messages", 5)) == 0
+            else f"last {wizard.get('last_x_messages', 5)} posts"
+        )
+        day_window = (
+            "any age" if int(wizard.get("last_x_days", 0)) == 0
+            else f"within {wizard.get('last_x_days', 0)} days"
+        )
         lines.append(
-            f"Window: last {wizard.get('last_x_messages', 5)} posts / "
-            f"{wizard.get('last_x_days', 0)} days"
+            f"Window: {message_window} / {day_window}"
         )
     wizard["step"] = "confirm"
     state.update({"view": "rule_wizard_confirm", "input": None})
@@ -1281,7 +1436,10 @@ async def _show_settings(
     await _edit_panel(
         context,
         state,
-        f"Settings\nRegular-user command/upload lock: {'ON' if locked else 'OFF'}",
+        f"Settings — Access Control\n"
+        f"Regular-user command/upload lock: {'ON' if locked else 'OFF'}\n\n"
+        "When ON, regular users can use only /start and cannot upload media. "
+        "Admins and approved Uploaders are unaffected.",
         markup,
         query=query,
     )
@@ -1327,6 +1485,24 @@ async def _edit_panel(
             )
     except Exception as exc:
         logger.warning("admin_panel_edit_failed (%s)", type(exc).__name__)
+        state["nonce"] = secrets.token_hex(4)
+        state.update({"view": "home", "closed": False})
+        _clear_pending_flow(state)
+        try:
+            sent = await context.bot.send_message(
+                chat_id=int(state["chat_id"]),
+                text=(
+                    "The previous panel could not be updated, so this is a fresh panel. "
+                    "The last action may already have been applied; review before repeating it."
+                ),
+                reply_markup=_home_markup(state),
+            )
+            state["message_id"] = int(sent.message_id)
+        except Exception as recovery_exc:
+            state["closed"] = True
+            logger.error(
+                "admin_panel_recovery_failed (%s)", type(recovery_exc).__name__
+            )
 
 
 async def _audit(

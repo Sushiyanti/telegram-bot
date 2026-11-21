@@ -17,6 +17,7 @@ from media_bot.handlers.panel import (
     admin_panel_callback,
     admin_panel_command,
     admin_panel_input,
+    expire_panel_flow_before_command,
 )
 import media_bot.handlers.panel as panel_handlers
 
@@ -146,6 +147,85 @@ async def test_previous_generation_callback_is_rejected(database: Database) -> N
     query.edit_message_text.assert_not_awaited()
 
 
+async def test_each_admin_command_opens_a_new_panel_and_retires_the_old_one(
+    database: Database,
+) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    context.bot.send_message.side_effect = [
+        SimpleNamespace(message_id=77),
+        SimpleNamespace(message_id=78),
+    ]
+    first_state = await open_panel(context)
+    old_nonce = first_state["nonce"]
+
+    second_state = await open_panel(context)
+
+    assert context.bot.send_message.await_count == 2
+    assert second_state is not first_state
+    assert second_state["message_id"] == 78
+    assert second_state["view"] == "home"
+    assert context.bot.edit_message_text.await_args.kwargs["message_id"] == 77
+    assert context.bot.edit_message_text.await_args.kwargs["reply_markup"] is None
+    assert "replaced" in context.bot.edit_message_text.await_args.kwargs["text"]
+
+    update, query = callback_update(ADMIN_ID, 77, f"m6:{old_nonce}:staff")
+    await admin_panel_callback(update, context)
+    query.answer.assert_awaited_once_with(
+        "This panel is expired or unavailable.", show_alert=True
+    )
+
+
+async def test_closed_panel_can_be_reopened_with_a_fresh_message(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    context.bot.send_message.side_effect = [
+        SimpleNamespace(message_id=77),
+        SimpleNamespace(message_id=78),
+    ]
+    first_state = await open_panel(context)
+    old_nonce = first_state["nonce"]
+    await press(context, "close")
+    assert first_state["closed"] is True
+
+    second_state = await open_panel(context)
+
+    assert second_state["message_id"] == 78
+    assert second_state["closed"] is False
+    update, query = callback_update(ADMIN_ID, 77, f"m6:{old_nonce}:staff")
+    await admin_panel_callback(update, context)
+    query.answer.assert_awaited_once_with(
+        "This panel is expired or unavailable.", show_alert=True
+    )
+
+
+async def test_edit_failure_creates_a_fresh_recoverable_panel(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    context.bot.send_message.side_effect = [
+        SimpleNamespace(message_id=77),
+        SimpleNamespace(message_id=78),
+    ]
+    state = await open_panel(context)
+    old_nonce = state["nonce"]
+    data = f"m6:{old_nonce}:staff"
+    update, query = callback_update(ADMIN_ID, 77, data)
+    query.edit_message_text.side_effect = RuntimeError("message is not editable")
+
+    await admin_panel_callback(update, context)
+
+    assert context.bot.send_message.await_count == 2
+    assert state["message_id"] == 78
+    assert state["view"] == "home"
+    assert state["input"] is None and state["wizard"] is None
+    assert "fresh panel" in context.bot.send_message.await_args.kwargs["text"]
+    stale_update, stale_query = callback_update(ADMIN_ID, 77, data)
+    await admin_panel_callback(stale_update, context)
+    stale_query.answer.assert_awaited_once_with(
+        "This panel is expired or unavailable.", show_alert=True
+    )
+
+
 async def test_add_admin_numeric_input_returns_to_staff_in_same_panel(database: Database) -> None:
     configure_admin_ids((ADMIN_ID,))
     context = make_context(database)
@@ -224,6 +304,100 @@ def _private_input(user_id: int = ADMIN_ID, text: str | None = None, **attrs):
 async def _send_expected_panel_input(context: SimpleNamespace, update) -> None:
     with pytest.raises(ApplicationHandlerStop):
         await admin_panel_input(update, context)
+
+
+async def test_add_category_flow_collects_name_and_forwarded_storage_channel(
+    database: Database,
+) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    state = await open_panel(context)
+    categories = await press(context, "categories")
+    assert "Add Category" in _keyboard_labels(categories.edit_message_text.await_args.kwargs["reply_markup"])
+    category_list = await press(context, "catadd")
+
+    assert state["view"] == "input_category_name"
+    assert "category name" in category_list.edit_message_text.await_args.kwargs["text"]
+
+    invalid, invalid_message = _private_input(text="Global")
+    await _send_expected_panel_input(context, invalid)
+    assert "reserved" in context.bot.edit_message_text.await_args.kwargs["text"]
+    invalid_message.reply_text.assert_not_awaited()
+
+    named, _ = _private_input(text="Education")
+    await _send_expected_panel_input(context, named)
+    assert state["input"] == {"kind": "category_storage"}
+    assert state["view"] == "input_category_storage"
+
+    forwarded, _ = _private_input(
+        text=None,
+        forward_origin=SimpleNamespace(
+            type="channel", chat=SimpleNamespace(id=-100810040)
+        ),
+    )
+    await _send_expected_panel_input(context, forwarded)
+
+    created = await CategoryRepository(database).get_by_name("Education")
+    assert created is not None and created.storage_channel_id == -100810040
+    assert state["input"] is None
+    assert "category_draft_name" not in state
+    assert state["view"] == "categories"
+    assert context.bot.send_message.await_count == 1
+    assert context.bot.edit_message_text.await_count == 3
+    assert "Category Education created." in context.bot.edit_message_text.await_args.kwargs["text"]
+
+
+async def test_add_category_accepts_numeric_storage_channel_and_cancel(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    state = await open_panel(context)
+    await press(context, "categories")
+    await press(context, "catadd")
+    named, _ = _private_input(text="Archive")
+    await _send_expected_panel_input(context, named)
+    target, _ = _private_input(text="-100810041")
+    await _send_expected_panel_input(context, target)
+    assert await CategoryRepository(database).get_by_name("Archive") is not None
+
+    await press(context, "catadd")
+    cancelled = await press(context, "inputcancel")
+    assert state["view"] == "categories"
+    assert state["input"] is None
+    assert "Category creation cancelled." in cancelled.edit_message_text.await_args.kwargs["text"]
+
+
+async def test_category_detail_link_and_delete_are_panel_managed(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    categories = CategoryRepository(database)
+    parent = await categories.create("Courses", -100810042)
+    child = await categories.create("Language", -100810043)
+    context = make_context(database)
+    await open_panel(context)
+    await press(context, "categories")
+
+    detail = await press(context, "cat", parent.id)
+    detail_text = detail.edit_message_text.await_args.kwargs["text"]
+    assert "Category: Courses" in detail_text
+    assert "Storage channel: -100810042" in detail_text
+    assert "Link to Child" in _keyboard_labels(detail.edit_message_text.await_args.kwargs["reply_markup"])
+
+    await press(context, "catlink", parent.id)
+    await press(context, "catlinkdo", parent.id, child.id)
+    assert [value.name for value in (await categories.links_for(parent.id))[1]] == ["Language"]
+
+    confirm = await press(context, "catdelete", parent.id)
+    confirm_text = confirm.edit_message_text.await_args.kwargs["text"]
+    assert "items will move to Default" in confirm_text
+    assert "linked categories themselves will remain" in confirm_text
+    assert "requirements that become orphaned" in confirm_text
+    assert {"Delete orphaned requirements", "Keep orphaned requirements", "Cancel"} <= set(
+        _keyboard_labels(confirm.edit_message_text.await_args.kwargs["reply_markup"])
+    )
+    await press(context, "catdeletedo", parent.id, "keep")
+
+    assert await categories.get(parent.id) is None
+    assert await categories.get(child.id) is not None
+    assert await categories.links_for(child.id) == ((), ())
 
 
 async def test_rule_wizard_creates_fake_join_rule_without_rule_syntax(database: Database) -> None:
@@ -393,10 +567,10 @@ async def test_timed_wait_wizard_skips_target_and_saves_zero_wait(database: Data
     context = make_context(database)
     state = await open_panel(context)
     await _open_global_rule_wizard(context)
-    await press(context, "rule_type", "TIMED_WAIT")
+    wait_screen = await press(context, "rule_type", "TIMED_WAIT")
     assert state["wizard"]["target"] is None
-    assert state["view"] == "rule_wizard_verification"
-    await press(context, "rule_verify", "fake")
+    assert state["view"] == "rule_wizard_wait"
+    assert "Real" not in _keyboard_labels(wait_screen.edit_message_text.await_args.kwargs["reply_markup"])
     await press(context, "rule_wait", 0)
     await press(context, "rule_wait_done")
     await press(context, "rule_save")
@@ -420,10 +594,14 @@ async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
     if screen == "target":
         query = await press(context, "rule_type", "JOIN_CHAT")
     elif screen == "verification":
-        query = await press(context, "rule_type", "TIMED_WAIT")
+        await press(context, "rule_type", "JOIN_CHAT")
+        inbound, _ = _private_input(text="-100810027")
+        await _send_expected_panel_input(context, inbound)
+        query = SimpleNamespace(edit_message_text=AsyncMock())
+        await panel_handlers._show_rule_verification(context, state, query=query)
     elif screen == "wait":
         await press(context, "rule_type", "TIMED_WAIT")
-        query = await press(context, "rule_verify", "fake")
+        query = await press(context, "rule_wait", 0)
     elif screen == "react_windows":
         await press(context, "rule_type", "REACT")
         inbound, _ = _private_input(text="-100810027")
@@ -432,7 +610,6 @@ async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
         query = await press(context, "rule_wait_done")
     elif screen == "confirm":
         await press(context, "rule_type", "TIMED_WAIT")
-        await press(context, "rule_verify", "fake")
         query = await press(context, "rule_wait_done")
     elif screen == "join_warning":
         context.bot.id = 998877
@@ -494,6 +671,28 @@ async def test_staff_lists_show_separate_add_admin_and_add_uploader_actions(data
     assert "Add Uploader" in _keyboard_labels(uploaders.edit_message_text.await_args.kwargs["reply_markup"])
 
 
+async def test_settings_panel_explains_and_toggles_regular_user_lock(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    await open_panel(context)
+
+    settings = await press(context, "settings")
+    text = settings.edit_message_text.await_args.kwargs["text"]
+    assert "regular users can use only /start" in text
+    assert "Admins and approved Uploaders are unaffected." in text
+    assert "Lock Bot (OFF)" in _keyboard_labels(settings.edit_message_text.await_args.kwargs["reply_markup"])
+    assert await panel_handlers.BotSettingsRepository(database).user_commands_enabled()
+
+    locked = await press(context, "lock")
+    assert not await panel_handlers.BotSettingsRepository(database).user_commands_enabled()
+    assert "Regular-user command/upload lock: ON" in locked.edit_message_text.await_args.kwargs["text"]
+    assert "Lock Bot (ON)" in _keyboard_labels(locked.edit_message_text.await_args.kwargs["reply_markup"])
+
+    unlocked = await press(context, "unlock")
+    assert await panel_handlers.BotSettingsRepository(database).user_commands_enabled()
+    assert "Lock Bot (OFF)" in _keyboard_labels(unlocked.edit_message_text.await_args.kwargs["reply_markup"])
+
+
 @pytest.mark.parametrize("already_env_admin", [False, True])
 async def test_add_admin_duplicate_paths_show_clear_notice(
     database: Database, already_env_admin: bool
@@ -546,6 +745,25 @@ async def test_pending_panel_state_expires_after_five_minutes(
     assert context.bot.edit_message_text.await_args.kwargs["text"] == "Admin Control Panel"
     message.reply_text.assert_not_awaited()
     assert not await AdminRepository(database).is_admin(NEW_ADMIN_ID)
+
+
+async def test_idle_panel_flow_expires_before_an_unrelated_command(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    state = await open_panel(context)
+    await press(context, "requirements")
+    await press(context, "reqscope", "g")
+    with patch.object(panel_handlers.time, "monotonic", return_value=100.0):
+        await press(context, "reqadd", "g")
+
+    command, message = _private_input(text="/share 12")
+    with patch.object(panel_handlers.time, "monotonic", return_value=401.0):
+        await expire_panel_flow_before_command(command, context)
+
+    assert state["view"] == "home"
+    assert state["wizard"] is None and state["input"] is None
+    assert context.bot.edit_message_text.await_args.kwargs["text"] == "Admin Control Panel"
+    message.reply_text.assert_not_awaited()
 
 
 async def _prepare_shared_rule(database: Database):
