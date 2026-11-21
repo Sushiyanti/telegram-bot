@@ -137,7 +137,7 @@ async def create_link(
 
 async def test_schema_v5_has_uploader_and_rate_limit_tables(database: Database) -> None:
     version, writable = await database.health_check()
-    assert version == 5
+    assert version == 6
     assert writable
     async with database.connection() as connection:
         rows = await (await connection.execute(

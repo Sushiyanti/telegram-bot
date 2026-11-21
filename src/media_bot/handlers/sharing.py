@@ -181,7 +181,8 @@ async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings = _settings(context)
     database = _database(context)
     uploaders = UploaderRepository(database)
-    allowed = is_admin(int(user.id)) or int(user.id) in settings.uploader_ids
+    admin = await is_admin(int(user.id), database)
+    allowed = admin or int(user.id) in settings.uploader_ids
     if not allowed:
         allowed = await uploaders.is_active(int(user.id))
     if not allowed:
@@ -191,7 +192,6 @@ async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Usage: /share <item_id>")
         return
     item_id = int(context.args[0])
-    admin = is_admin(int(user.id))
     items = ItemRepository(database)
     item = await items.get(item_id)
     if item is None:
@@ -284,7 +284,7 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if target_id <= 0:
         await message.reply_text("User ID must be a positive numeric ID.")
         return
-    if target_id in _settings(context).admin_ids:
+    if await is_admin(target_id, _database(context)):
         await message.reply_text("Administrators cannot be revoked.")
         return
     changed = await UploaderRepository(_database(context)).revoke(

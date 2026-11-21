@@ -15,8 +15,8 @@ class ConfigurationError(ValueError):
     """Raised when runtime settings are missing or invalid."""
 
 
-# Populated from validated Settings during application construction. Authorization
-# reads this configuration value directly and never queries the database.
+# Populated from validated Settings during application construction. These IDs are
+# the immutable super-admin fallback even when the database role registry fails.
 ADMIN_IDS: frozenset[int] = frozenset()
 _MIN_SIGNED_64 = -(1 << 63)
 _MAX_SIGNED_64 = (1 << 63) - 1

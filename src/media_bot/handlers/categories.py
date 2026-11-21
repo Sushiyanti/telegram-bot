@@ -150,7 +150,7 @@ async def delete_category_callback(update: Update, context: ContextTypes.DEFAULT
         await query.answer("Invalid category action.", show_alert=True)
         return
     choice, category_text, owner_text = match.groups()
-    if not is_admin(int(user.id)) or int(owner_text) != int(user.id):
+    if not await is_admin(int(user.id), _database(context)) or int(owner_text) != int(user.id):
         await query.answer("Not authorized.", show_alert=True)
         return
     if choice == "x":

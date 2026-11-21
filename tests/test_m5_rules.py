@@ -15,7 +15,7 @@ from telegram.ext import ApplicationHandlerStop
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
 from media_bot.db.models import MediaItem, StorageMessageRef
-from media_bot.db.repositories import ItemRepository, ShareLinkRepository
+from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
 from media_bot.db.rules import (
     BotSettingsRepository,
     CategoryRepository,
@@ -141,7 +141,7 @@ async def test_schema_v5_seeds_default_and_backfills_legacy_items(tmp_path: Path
     default = await CategoryRepository(database).default()
     version, _ = await database.health_check()
 
-    assert version == 5
+    assert version == 6
     assert default.name == "Default"
     assert default.storage_channel_id == STORAGE_ID
     assert item is not None and item.category_id == default.id
@@ -535,7 +535,9 @@ async def test_togglecommands_and_policy_lock_regular_commands_but_allow_start_r
     assert await BotSettingsRepository(database).toggle_user_commands() is False
 
     def context():
-        return SimpleNamespace(application=SimpleNamespace(bot_data={"database": database}))
+        return SimpleNamespace(application=SimpleNamespace(bot_data={
+            "database": database, "settings": settings(database),
+        }))
 
     disallowed = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
@@ -557,7 +559,9 @@ async def test_togglecommands_and_policy_lock_regular_commands_but_allow_start_r
 async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) -> None:
     configure_admin_ids((ADMIN_ID,))
     await BotSettingsRepository(database).toggle_user_commands()
-    context = SimpleNamespace(application=SimpleNamespace(bot_data={"database": database}))
+    context = SimpleNamespace(application=SimpleNamespace(bot_data={
+        "database": database, "settings": settings(database),
+    }))
     media_update = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
         effective_message=SimpleNamespace(photo=[object()], reply_text=AsyncMock()),
@@ -570,6 +574,14 @@ async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) 
     )
     await enforce_user_command_policy(admin_update, context)
     admin_update.effective_message.reply_text.assert_not_awaited()
+
+    await UploaderRepository(database).add(user_id=USER_ID, added_by=ADMIN_ID)
+    uploader_update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=USER_ID),
+        effective_message=SimpleNamespace(photo=[object()], reply_text=AsyncMock()),
+    )
+    await enforce_user_command_policy(uploader_update, context)
+    uploader_update.effective_message.reply_text.assert_not_awaited()
 
 
 @pytest.mark.parametrize("choice,expected_count", [("a", 0), ("b", 1)])

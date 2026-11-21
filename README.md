@@ -1,6 +1,6 @@
 # Telegram Private Media Storage Bot
 
-A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance; M5 adds category-specific storage and dynamic access requirements.
+A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance; M5 adds category-specific storage and dynamic access requirements; M6 adds database-backed admin roles and a single-message admin panel.
 
 ## Runtime and dependencies
 
@@ -23,7 +23,7 @@ Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, 
 
 The bot can be started with either `uv run --locked --group dev python -m app` or `uv run --locked --group dev python -m media_bot`. Both entry points validate settings and initialize the database before polling. Missing or malformed settings produce a readable error that lists each invalid key. The token is never read from a tracked file; if a token is disclosed, revoke it through BotFather and replace it.
 
-`/whoami` reports the caller's numeric user ID and configuration-based admin status. Admin-only `/configcheck` reports sanitized PASS/FAIL checks for `getMe`, storage-channel reachability and administrator status, channel privacy, admin-ID parsing/count, database version/writability, and the configured maximum relay size. A live `/configcheck` PASS was verified previously; automated configcheck tests continue to mock Telegram calls.
+`/whoami` reports the caller's numeric user ID and effective environment-or-database admin status. Admin-only `/configcheck` reports sanitized PASS/FAIL checks for `getMe`, storage-channel reachability and administrator status, channel privacy, admin-ID parsing/count, database version/writability, and the configured maximum relay size. A live `/configcheck` PASS was verified previously; automated configcheck tests continue to mock Telegram calls.
 
 ## M2 private media intake
 
@@ -47,17 +47,21 @@ Admin-only `/list [limit]` shows up to 100 recent items (10 by default), with it
 
 Admin-only `/addcategory`, `/linkcategory`, `/addrequirement`, `/delcategory`, and `/togglecommands` provide multi-category storage, inherited/global requirements, safe category deletion, and a persistent non-admin command/upload lock. REACT rules use the latest five eligible posts by default, with optional message-count and age windows. When more than one category exists, an uploader must choose a storage destination before any Telegram copy occurs; the pending choice is durable and owner-checked. Global, category, and inherited child requirements are evaluated before a share-link use is consumed. Details, command syntax, fallback behavior, and Telegram API constraints are documented in [docs/M5_CATEGORIES_AND_REQUIREMENTS.md](docs/M5_CATEGORIES_AND_REQUIREMENTS.md).
 
+## M6 admin roles and control panel
+
+Migration 0006 adds durable database-backed administrator roles. On startup, every validated `ADMIN_IDS` entry is upserted into `admins`; those environment IDs remain super-admins even if the database is unavailable and cannot be removed through the panel. Other DB administrators and uploaders can be managed in `/admin` (also `/panel`). The panel keeps one private Telegram message and edits it in place for category, requirement, staff, and settings navigation. Pending Add flows consume a numeric ID or forwarded user message and edit the same panel when complete. When `ENABLE_USER_COMMANDS=false`, admins and active uploaders bypass the lock; regular users are still blocked from commands other than `/start` and `/redeem`, and from uploads. See [docs/M6_ADMIN_PANEL.md](docs/M6_ADMIN_PANEL.md) for the panel flows and role behavior.
+
 ## Tests
 
 ```sh
 uv run --locked --group dev pytest
 ```
 
-Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke/list/delete, share URLs, member/non-member and album delivery, missing-channel and missing-storage behavior, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, category selection/recovery/deletion, inherited and global requirements, START_BOT limitations, JOIN_CHAT and REACT checks, command lockdown, and backup/restore. All Telegram calls in tests are mocked.
+Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, environment/database admin roles and startup seeding, admin-panel keyboards/callbacks/state transitions, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke/list/delete, share URLs, member/non-member and album delivery, missing-channel and missing-storage behavior, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, category selection/recovery/deletion, inherited and global requirements, START_BOT limitations, JOIN_CHAT and REACT checks, command lockdown and uploader bypass, and backup/restore. All Telegram calls in tests are mocked.
 
 ## Persistence and share-link safety
 
-The current schema is version 5. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Migration 0004 adds the identity parent table, uploader grants, durable redemption throttles, and share-link use counters/limits. Migration 0005 adds categories, item and pending-upload category metadata, requirements and inheritance, command settings, observed posts, and durable reaction state. Audit records have database triggers that reject update and delete operations.
+The current schema is version 6. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Migration 0004 adds the identity parent table, uploader grants, durable redemption throttles, and share-link use counters/limits. Migration 0005 adds categories, item and pending-upload category metadata, requirements and inheritance, command settings, observed posts, and durable reaction state. Migration 0006 adds the `admins` role registry; startup seeds configured environment administrators without removing DB-only roles. Audit records have database triggers that reject update and delete operations.
 
 Items map to one or more private storage message references. Share links store only a SHA-256 digest of a cryptographically random bearer token, are non-expiring by default, and can be revoked. **The proposed seven-day TTL change was deferred by the user; no TTL default change has been applied.** File sizes are integer byte counts when Telegram provides them; an unknown size is stored as `NULL`. There is no hardcoded maximum file size in the schema.
 
@@ -104,6 +108,6 @@ Before enabling the service, add the bot to the private storage channel as an ad
 
 ## Current scope and next integration work
 
-M5 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channels, and authorized test accounts.
+M6 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channels, and authorized test accounts.
 
 Large-file limits are being investigated separately. The complete future integration test must upload each fixture through a Premium or ordinary user account to the bot, copy it into the private channel, persist the message reference, copy it to a test recipient, and verify a full download/checksum. Documented limits and experimental results will be kept distinct; no size is supported merely because a client displays it.

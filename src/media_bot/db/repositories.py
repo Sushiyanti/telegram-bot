@@ -516,6 +516,32 @@ class UploaderRepository:
             revoked_at=row["revoked_at"],
         )
 
+    async def list_active_page(
+        self, *, offset: int = 0, limit: int = 10
+    ) -> tuple[int, tuple[UploaderGrant, ...]]:
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise InvalidRecord("offset must be a non-negative integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise InvalidRecord("limit must be between 1 and 1,000")
+        async with self.database.connection() as connection:
+            count_row = await (await connection.execute(
+                "SELECT COUNT(*) FROM uploaders WHERE revoked_at IS NULL"
+            )).fetchone()
+            cursor = await connection.execute(
+                """SELECT user_id, added_by, added_at, revoked_at FROM uploaders
+                   WHERE revoked_at IS NULL ORDER BY user_id LIMIT ? OFFSET ?""",
+                (limit, offset),
+            )
+            rows = await cursor.fetchall()
+        return int(count_row[0]), tuple(
+            UploaderGrant(
+                user_id=int(row["user_id"]),
+                added_by=None if row["added_by"] is None else int(row["added_by"]),
+                added_at=str(row["added_at"]),
+                revoked_at=row["revoked_at"],
+            ) for row in rows
+        )
+
     async def add(self, *, user_id: int, added_by: int | None) -> bool:
         """Insert or restore a grant and append an audit event atomically."""
         _require_positive_int(user_id, "user_id")

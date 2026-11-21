@@ -160,12 +160,12 @@ async def collect_config_checks(
 async def whoami_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Report the caller's numeric ID and configuration-based admin status."""
-    del context
+    """Report the caller's numeric ID and effective admin status."""
     user = update.effective_user
     message = update.effective_message
     if user is not None and message is not None:
-        admin_status = "yes" if is_admin(user.id) else "no"
+        database = context.application.bot_data.get("database")
+        admin_status = "yes" if await is_admin(user.id, database) else "no"
         await message.reply_text(
             f"Your user_id: {user.id}\nAdmin: {admin_status}"
         )

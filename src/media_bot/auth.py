@@ -1,4 +1,4 @@
-"""Configuration-based administrator authorization for Telegram handlers."""
+"""Environment- and database-backed authorization for Telegram handlers."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from telegram.ext import ContextTypes
 
 from media_bot import config
 from media_bot.config import Settings
+from media_bot.db.admins import AdminRepository
 from media_bot.db.audit_repository import AuditLogRepository
+from media_bot.db.database import Database
 from media_bot.db.repositories import UploaderRepository
 
 
@@ -19,16 +21,32 @@ logger = logging.getLogger(__name__)
 CommandHandlerFunction = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
-def is_admin(user_id: int) -> bool:
-    """Return whether a numeric Telegram user ID is in validated config.ADMIN_IDS."""
-    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+def _valid_user_id(user_id: int) -> bool:
+    return (
+        not isinstance(user_id, bool)
+        and isinstance(user_id, int)
+        and 0 < user_id <= (1 << 63) - 1
+    )
+
+
+async def is_admin(user_id: int, database: Database | None = None) -> bool:
+    """Check the immutable environment fallback, then the durable admin registry."""
+    if not _valid_user_id(user_id):
         return False
-    return user_id in config.ADMIN_IDS
+    if user_id in config.ADMIN_IDS:
+        return True
+    if database is None:
+        return False
+    try:
+        return await AdminRepository(database).is_admin(user_id)
+    except Exception as exc:
+        logger.error("admin_role_lookup_failed (%s)", type(exc).__name__)
+        return False
 
 
 def can_upload(user_id: int, settings: Settings) -> bool:
     """Return authorization from the static portion of the uploader allowlist."""
-    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+    if not _valid_user_id(user_id):
         return False
     if settings.uploader_mode == "all":
         return True
@@ -38,8 +56,12 @@ def can_upload(user_id: int, settings: Settings) -> bool:
 async def can_upload_with_registry(
     user_id: int, settings: Settings, uploaders: UploaderRepository
 ) -> bool:
-    """Apply the M3 effective allowlist, including active database grants."""
-    return can_upload(user_id, settings) or await uploaders.is_active(user_id)
+    """Apply admins, static settings, and active DB uploader grants."""
+    if not _valid_user_id(user_id):
+        return False
+    if can_upload(user_id, settings) or await is_admin(user_id, uploaders.database):
+        return True
+    return await uploaders.is_active(user_id)
 
 
 def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:
@@ -47,12 +69,12 @@ def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:
     @wraps(handler)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
-        if user is not None and is_admin(user.id):
+        database = context.application.bot_data.get("database")
+        if user is not None and await is_admin(user.id, database):
             await handler(update, context)
             return
 
         if user is not None:
-            database = context.application.bot_data.get("database")
             if database is None:
                 logger.error("admin_denied audit unavailable (database not configured)")
             else:

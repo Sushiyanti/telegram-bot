@@ -150,6 +150,31 @@ class CategoryRepository:
             rows = await cursor.fetchall()
         return tuple(_requirement_from_row(row) for row in rows)
 
+    async def links_for(
+        self, category_id: int
+    ) -> tuple[tuple[Category, ...], tuple[Category, ...]]:
+        """Return this category's parents and children for an admin detail view."""
+        _positive_id(category_id, "category_id")
+        async with self.database.connection() as connection:
+            parents_cursor = await connection.execute(
+                """SELECT categories.* FROM categories
+                   JOIN category_links ON category_links.parent_category_id = categories.id
+                   WHERE category_links.child_category_id = ? ORDER BY categories.name COLLATE NOCASE""",
+                (category_id,),
+            )
+            children_cursor = await connection.execute(
+                """SELECT categories.* FROM categories
+                   JOIN category_links ON category_links.child_category_id = categories.id
+                   WHERE category_links.parent_category_id = ? ORDER BY categories.name COLLATE NOCASE""",
+                (category_id,),
+            )
+            parents = await parents_cursor.fetchall()
+            children = await children_cursor.fetchall()
+        return (
+            tuple(_category_from_row(row) for row in parents),
+            tuple(_category_from_row(row) for row in children),
+        )
+
     async def delete(self, name: str, *, delete_orphaned_requirements: bool) -> Category:
         category = await self.get_by_name(name)
         if category is None:
@@ -263,6 +288,60 @@ class RequirementRepository:
             row = await cursor.fetchone()
         return None if row is None else _requirement_from_row(row)
 
+    async def list_for_scope(self, category_id: int | None) -> tuple[Requirement, ...]:
+        """List rules directly attached to one category or the global scope."""
+        if category_id is not None:
+            _positive_id(category_id, "category_id")
+        async with self.database.connection() as connection:
+            if category_id is None:
+                cursor = await connection.execute(
+                    """SELECT requirements.* FROM requirements
+                       JOIN category_requirements ON category_requirements.requirement_id = requirements.id
+                       WHERE category_requirements.category_id IS NULL
+                       ORDER BY requirements.id"""
+                )
+            else:
+                cursor = await connection.execute(
+                    """SELECT requirements.* FROM requirements
+                       JOIN category_requirements ON category_requirements.requirement_id = requirements.id
+                       WHERE category_requirements.category_id = ?
+                       ORDER BY requirements.id""",
+                    (category_id,),
+                )
+            rows = await cursor.fetchall()
+        return tuple(_requirement_from_row(row) for row in rows)
+
+    async def remove_from_scope(
+        self, *, category_id: int | None, requirement_id: int
+    ) -> bool:
+        """Remove only this scope's association; delete the rule when unreferenced."""
+        if category_id is not None:
+            _positive_id(category_id, "category_id")
+        _positive_id(requirement_id, "requirement_id")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            if category_id is None:
+                cursor = await connection.execute(
+                    "DELETE FROM category_requirements WHERE category_id IS NULL AND requirement_id = ?",
+                    (requirement_id,),
+                )
+            else:
+                cursor = await connection.execute(
+                    "DELETE FROM category_requirements WHERE category_id = ? AND requirement_id = ?",
+                    (category_id, requirement_id),
+                )
+            if cursor.rowcount != 1:
+                await connection.rollback()
+                return False
+            await connection.execute(
+                """DELETE FROM requirements WHERE id = ? AND NOT EXISTS (
+                       SELECT 1 FROM category_requirements WHERE requirement_id = ?
+                   )""",
+                (requirement_id, requirement_id),
+            )
+            await connection.commit()
+        return True
+
 
 class BotSettingsRepository:
     """Read and change durable key/value behavior flags."""
@@ -291,6 +370,28 @@ class BotSettingsRepository:
             )
             await connection.commit()
         return enabled
+
+    async def set_user_commands_enabled(self, enabled: bool) -> bool:
+        """Set lockdown state explicitly; return whether it changed."""
+        if not isinstance(enabled, bool):
+            raise InvalidRecord("enabled must be a boolean")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = ?", (self.COMMANDS_KEY,)
+            )
+            row = await cursor.fetchone()
+            current = True if row is None else str(row["value"]).lower() == "true"
+            if current == enabled:
+                await connection.commit()
+                return False
+            await connection.execute(
+                """INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (self.COMMANDS_KEY, "true" if enabled else "false"),
+            )
+            await connection.commit()
+        return True
 
 
 class ReactionRepository:

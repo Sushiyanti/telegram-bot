@@ -11,6 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler
 
 from media_bot.application import build_application
 from media_bot.config import Settings
+from media_bot.db.admins import AdminRepository
 from media_bot.startup import StartupPrerequisiteError, prepare_state_directory
 
 
@@ -61,7 +62,7 @@ def test_application_builds_without_network_access(settings: Settings) -> None:
     assert commands == {
         "start", "whoami", "configcheck", "share", "redeem", "adduser", "revoke",
         "list", "delete", "addcategory", "linkcategory", "addrequirement",
-        "delcategory", "togglecommands",
+        "delcategory", "togglecommands", "admin", "panel",
     }
     assert application.bot_data["settings"] is settings
     assert application.bot_data["database"].path == settings.db_path
@@ -82,6 +83,17 @@ def test_all_uploaders_in_production_emits_startup_warning(
         build_application(application_settings)
 
     assert "UPLOADER_MODE=all" in caplog.text
+
+
+async def test_post_init_seeds_configured_admins_before_recovery(settings: Settings) -> None:
+    application = build_application(settings)
+    database = application.bot_data["database"]
+    await database.initialize(storage_channel_id=settings.storage_channel_id)
+
+    assert application.post_init is not None
+    await application.post_init(application)
+
+    assert await AdminRepository(database).is_admin(settings.admin_ids[0])
 
 
 def test_python_m_app_fails_clearly_when_required_configuration_is_missing(
