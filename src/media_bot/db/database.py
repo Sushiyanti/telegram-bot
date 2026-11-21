@@ -54,8 +54,8 @@ class Database:
         finally:
             await connection.close()
 
-    async def initialize(self) -> None:
-        """Create a private database file, enable WAL, and apply pending SQL migrations."""
+    async def initialize(self, *, storage_channel_id: int | None = None) -> None:
+        """Create a private database file, apply migrations, and optionally seed Default."""
         try:
             if self.path.exists() and not self.path.is_file():
                 raise DatabaseError("Database path exists but is not a file")
@@ -107,6 +107,25 @@ class Database:
                         raise MigrationError(
                             f"Migration {version:04d} did not set the expected schema version"
                         )
+                if storage_channel_id is not None:
+                    if (
+                        isinstance(storage_channel_id, bool)
+                        or not isinstance(storage_channel_id, int)
+                        or storage_channel_id == 0
+                    ):
+                        raise DatabaseError("storage_channel_id must be a non-zero integer")
+                    await connection.execute("BEGIN IMMEDIATE")
+                    await connection.execute(
+                        """UPDATE categories SET storage_channel_id = ?
+                           WHERE name = 'Default' AND storage_channel_id IS NULL""",
+                        (storage_channel_id,),
+                    )
+                    await connection.execute(
+                        """UPDATE items SET storage_channel_id = ?
+                           WHERE storage_channel_id IS NULL""",
+                        (storage_channel_id,),
+                    )
+                    await connection.commit()
         except (DatabaseError, MigrationError):
             raise
         except (OSError, sqlite3.Error, aiosqlite.Error) as exc:

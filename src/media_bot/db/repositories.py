@@ -44,6 +44,16 @@ def _require_positive_int(value: int, field: str) -> None:
         raise InvalidRecord(f"{field} must be a positive integer")
 
 
+def _require_nonzero_int(value: int, field: str) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value == 0
+        or not -(1 << 63) <= value <= (1 << 63) - 1
+    ):
+        raise InvalidRecord(f"{field} must be a non-zero signed 64-bit integer")
+
+
 def _require_time(value: int, field: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise InvalidRecord(f"{field} must be a non-negative integer millisecond timestamp")
@@ -81,6 +91,17 @@ class ItemRepository:
             raise InvalidRecord("sha256 must be a 32-byte digest or None")
         if not item.storage_messages:
             raise InvalidRecord("A shareable item must have at least one storage message")
+        message_chat_ids = {reference.chat_id for reference in item.storage_messages}
+        if len(message_chat_ids) != 1:
+            raise InvalidRecord("All storage messages for an item must use the same channel")
+        storage_channel_id = item.storage_channel_id
+        if storage_channel_id is None:
+            storage_channel_id = next(iter(message_chat_ids))
+        elif storage_channel_id not in message_chat_ids:
+            raise InvalidRecord("storage_channel_id must match the item's storage messages")
+        _require_nonzero_int(storage_channel_id, "storage_channel_id")
+        if item.category_id is not None:
+            _require_positive_int(item.category_id, "category_id")
         sequences: set[int] = set()
         references: set[tuple[int, int]] = set()
         for reference in item.storage_messages:
@@ -125,11 +146,38 @@ class ItemRepository:
         try:
             async with self.database.connection() as connection:
                 await connection.execute("BEGIN IMMEDIATE")
+                if item.category_id is None:
+                    cursor = await connection.execute(
+                        "SELECT id, storage_channel_id FROM categories WHERE name = 'Default' COLLATE NOCASE"
+                    )
+                    default_row = await cursor.fetchone()
+                    if default_row is None:
+                        raise InvalidRecord("Default category has not been initialized")
+                    category_id = int(default_row["id"])
+                    category_storage_id = default_row["storage_channel_id"]
+                else:
+                    cursor = await connection.execute(
+                        "SELECT storage_channel_id FROM categories WHERE id = ?",
+                        (item.category_id,),
+                    )
+                    category_row = await cursor.fetchone()
+                    if category_row is None:
+                        raise InvalidRecord("category_id does not exist")
+                    category_id = item.category_id
+                    category_storage_id = category_row["storage_channel_id"]
+                if (
+                    category_storage_id is not None
+                    and int(category_storage_id) != storage_channel_id
+                ):
+                    raise InvalidRecord(
+                        "storage_channel_id must match the selected category's storage channel"
+                    )
                 cursor = await connection.execute(
                     """INSERT INTO items
                        (owner_user_id, media_type, file_size_bytes, file_name, mime_type,
-                        caption, protect_content, created_at_ms, sha256)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        caption, protect_content, created_at_ms, sha256, category_id,
+                        storage_channel_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         item.owner_user_id,
                         item.media_type,
@@ -140,6 +188,8 @@ class ItemRepository:
                         int(item.protect_content),
                         now,
                         item.sha256,
+                        category_id,
+                        storage_channel_id,
                     ),
                 )
                 item_id = int(cursor.lastrowid)
@@ -194,7 +244,13 @@ class ItemRepository:
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Item or storage-file data violates database constraints") from exc
-        return replace(item, id=item_id, created_at_ms=now)
+        return replace(
+            item,
+            id=item_id,
+            created_at_ms=now,
+            category_id=category_id,
+            storage_channel_id=storage_channel_id,
+        )
 
     async def get(self, item_id: int) -> MediaItem | None:
         _require_positive_int(item_id, "item_id")
@@ -240,6 +296,10 @@ class ItemRepository:
             created_at_ms=int(row["created_at_ms"]),
             sha256=None if row["sha256"] is None else bytes(row["sha256"]),
             files=files,
+            category_id=None if row["category_id"] is None else int(row["category_id"]),
+            storage_channel_id=(
+                None if row["storage_channel_id"] is None else int(row["storage_channel_id"])
+            ),
         )
 
     async def list_recent(self, limit: int = 10) -> tuple[ItemSummary, ...]:
@@ -810,6 +870,63 @@ class PendingUploadRepository:
                 uploads.append(_pending_upload_from_row(row, messages))
         return tuple(uploads)
 
+    async def assign_category(
+        self,
+        upload_id: str,
+        *,
+        owner_user_id: int,
+        category_id: int,
+        selection_pending: bool = False,
+    ) -> bool:
+        """Assign a category only to its owner's ready upload."""
+        _validate_text(upload_id, "upload_id", max_length=128)
+        _require_positive_int(owner_user_id, "owner_user_id")
+        _require_positive_int(category_id, "category_id")
+        if not isinstance(selection_pending, bool):
+            raise InvalidRecord("selection_pending must be a boolean")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT owner_user_id, status FROM pending_uploads WHERE upload_id = ?",
+                (upload_id,),
+            )
+            upload = await cursor.fetchone()
+            if (
+                upload is None
+                or int(upload["owner_user_id"]) != owner_user_id
+                or str(upload["status"]) not in {"collecting", "ready"}
+            ):
+                await connection.rollback()
+                return False
+            cursor = await connection.execute(
+                "SELECT 1 FROM categories WHERE id = ?", (category_id,)
+            )
+            if await cursor.fetchone() is None:
+                await connection.rollback()
+                return False
+            await connection.execute(
+                """UPDATE pending_uploads SET category_id = ?, category_selection_pending = ?
+                   WHERE upload_id = ?""",
+                (category_id, int(selection_pending), upload_id),
+            )
+            await connection.commit()
+        return True
+
+    async def mark_category_selection_pending(
+        self, upload_id: str, *, owner_user_id: int
+    ) -> bool:
+        """Persist a no-category choice state before showing an inline keyboard."""
+        _validate_text(upload_id, "upload_id", max_length=128)
+        _require_positive_int(owner_user_id, "owner_user_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                """UPDATE pending_uploads SET category_selection_pending = 1
+                   WHERE upload_id = ? AND owner_user_id = ?
+                     AND status IN ('collecting', 'ready') AND category_id IS NULL""",
+                (upload_id, owner_user_id),
+            )
+            return cursor.rowcount == 1
+
     async def transition(
         self,
         upload_id: str,
@@ -924,4 +1041,6 @@ def _pending_upload_from_row(row: sqlite3.Row, messages: tuple[PendingUploadMess
         finished_at_ms=None if row["finished_at_ms"] is None else int(row["finished_at_ms"]),
         error_code=row["error_code"],
         pipeline=str(row["pipeline"]),
+        category_id=None if row["category_id"] is None else int(row["category_id"]),
+        category_selection_pending=bool(row["category_selection_pending"]),
     )

@@ -34,7 +34,11 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(Database(settings.db_path).initialize())
+        loop.run_until_complete(
+            Database(settings.db_path).initialize(
+                storage_channel_id=settings.storage_channel_id
+            )
+        )
     except DatabaseError as exc:
         logger.error("Database initialization failed: %s", exc)
         loop.close()
@@ -44,7 +48,7 @@ def main() -> None:
     application = build_application(settings)
     logger.info("Starting Telegram bot in long-polling mode")
     application.run_polling(
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message", "callback_query", "channel_post", "message_reaction"],
         drop_pending_updates=False,
     )
 

@@ -15,8 +15,10 @@ from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
 from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
+from media_bot.db.rules import CategoryRepository
 from media_bot.media_transfer import TransferCapabilities
 from media_bot.services import ShareLinkService
+from media_bot.services.rule_engine import RequirementEvaluator
 
 
 logger = logging.getLogger(__name__)
@@ -78,7 +80,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if item is None or not item.storage_messages:
         await message.reply_text("This shared item is unavailable.")
         return
-    if any(reference.chat_id != settings.storage_channel_id for reference in item.storage_messages):
+    expected_storage_id = item.storage_channel_id
+    if expected_storage_id is None:
+        category = await CategoryRepository(database).get(item.category_id) if item.category_id else None
+        expected_storage_id = (
+            category.storage_channel_id
+            if category is not None and category.storage_channel_id is not None
+            else settings.storage_channel_id
+        )
+    if any(reference.chat_id != expected_storage_id for reference in item.storage_messages):
         await message.reply_text("This shared item is unavailable.")
         return
     if not TransferCapabilities(settings.verified_transfer_max_file_bytes).supports(
@@ -114,6 +124,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 logger.warning("required_channel_name_lookup_failed (%s)", type(exc).__name__)
             await message.reply_text(f"Join {channel} to access.")
             return
+
+    category_id = item.category_id
+    if category_id is None:
+        category_id = (await CategoryRepository(database).default()).id
+    if not await RequirementEvaluator(database).verify(
+        category_id=category_id,
+        user_id=int(user.id),
+        bot=context.bot,
+        message=message,
+    ):
+        return
 
     consumed = await links.consume(token)
     if consumed is None:

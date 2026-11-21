@@ -1,6 +1,6 @@
 # Telegram Private Media Storage Bot
 
-A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance.
+A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance; M5 adds category-specific storage and dynamic access requirements.
 
 ## Runtime and dependencies
 
@@ -41,7 +41,11 @@ Opening `/start <token>` checks token validity, expiry, revocation, remaining us
 
 ## M4 admin management and resilience
 
-Admin-only `/list [limit]` shows up to 100 recent items (10 by default), with item ID, uploader ID, media type, byte size, and UTC creation date; Telegram file IDs are never included. Admin-only `/delete <item_id>` transactionally removes the item, storage references, share links, per-file metadata, and fingerprints, then best-effort deletes the associated storage-channel messages. Telegram deletion errors (including a message already removed manually) do not interrupt database cleanup. The schema remains version 4; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a headless VPS and scheduled-backup guide.
+Admin-only `/list [limit]` shows up to 100 recent items (10 by default), with item ID, uploader ID, media type, byte size, and UTC creation date; Telegram file IDs are never included. Admin-only `/delete <item_id>` transactionally removes the item, storage references, share links, per-file metadata, and fingerprints, then best-effort deletes the associated storage-channel messages. Telegram deletion errors (including a message already removed manually) do not interrupt database cleanup. At M4, the schema was version 4; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a headless VPS and scheduled-backup guide.
+
+## M5 categories and dynamic requirements
+
+Admin-only `/addcategory`, `/linkcategory`, `/addrequirement`, `/delcategory`, and `/togglecommands` provide multi-category storage, inherited/global requirements, safe category deletion, and a persistent non-admin command/upload lock. REACT rules use the latest five eligible posts by default, with optional message-count and age windows. When more than one category exists, an uploader must choose a storage destination before any Telegram copy occurs; the pending choice is durable and owner-checked. Global, category, and inherited child requirements are evaluated before a share-link use is consumed. Details, command syntax, fallback behavior, and Telegram API constraints are documented in [docs/M5_CATEGORIES_AND_REQUIREMENTS.md](docs/M5_CATEGORIES_AND_REQUIREMENTS.md).
 
 ## Tests
 
@@ -49,11 +53,11 @@ Admin-only `/list [limit]` shows up to 100 recent items (10 by default), with it
 uv run --locked --group dev pytest
 ```
 
-Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke/list/delete, share URLs, member/non-member and album delivery, missing-channel and missing-storage behavior, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. All Telegram calls in tests are mocked.
+Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke/list/delete, share URLs, member/non-member and album delivery, missing-channel and missing-storage behavior, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, category selection/recovery/deletion, inherited and global requirements, START_BOT limitations, JOIN_CHAT and REACT checks, command lockdown, and backup/restore. All Telegram calls in tests are mocked.
 
 ## Persistence and share-link safety
 
-The current schema is version 4. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Migration 0004 adds the identity parent table, uploader grants, durable redemption throttles, and share-link use counters/limits. Audit records have database triggers that reject update and delete operations.
+The current schema is version 5. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Migration 0004 adds the identity parent table, uploader grants, durable redemption throttles, and share-link use counters/limits. Migration 0005 adds categories, item and pending-upload category metadata, requirements and inheritance, command settings, observed posts, and durable reaction state. Audit records have database triggers that reject update and delete operations.
 
 Items map to one or more private storage message references. Share links store only a SHA-256 digest of a cryptographically random bearer token, are non-expiring by default, and can be revoked. **The proposed seven-day TTL change was deferred by the user; no TTL default change has been applied.** File sizes are integer byte counts when Telegram provides them; an unknown size is stored as `NULL`. There is no hardcoded maximum file size in the schema.
 
@@ -100,6 +104,6 @@ Before enabling the service, add the bot to the private storage channel as an ad
 
 ## Current scope and next integration work
 
-M4 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channel, and authorized test accounts.
+M5 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channels, and authorized test accounts.
 
 Large-file limits are being investigated separately. The complete future integration test must upload each fixture through a Premium or ordinary user account to the bot, copy it into the private channel, persist the message reference, copy it to a test recipient, and verify a full download/checksum. Documented limits and experimental results will be kept distinct; no size is supported merely because a client displays it.

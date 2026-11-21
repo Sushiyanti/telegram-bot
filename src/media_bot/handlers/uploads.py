@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from media_bot.auth import can_upload_with_registry
@@ -18,6 +18,7 @@ from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
 from media_bot.db.models import ItemFile, MediaItem, PendingUploadMessage
 from media_bot.db.repositories import ItemRepository, PendingUploadRepository, UploaderRepository
+from media_bot.db.rules import CategoryRepository
 from media_bot.media_transfer import StorageMessageRef
 from media_bot.services import PendingUploadService
 
@@ -96,6 +97,7 @@ class UploadHandler:
         self.settings = settings
         self.database = database
         self.items = ItemRepository(database)
+        self.categories = CategoryRepository(database)
         self.uploaders = UploaderRepository(database)
         self.pending = PendingUploadService(PendingUploadRepository(database))
         self.audit = AuditLogRepository(database)
@@ -260,6 +262,52 @@ class UploadHandler:
                 message,
             )
 
+    async def _send_category_selection(
+        self,
+        upload: Any,
+        categories: tuple[Any, ...],
+        bot: Any,
+        chat_id: int,
+        reply_message: Any | None,
+    ) -> None:
+        buttons = [
+            [InlineKeyboardButton(
+                category.name[:64],
+                callback_data=f"uselect:{upload.upload_id}:{category.id}",
+            )]
+            for category in categories
+        ]
+        markup = InlineKeyboardMarkup(buttons)
+        text = "Choose a storage category for this upload."
+        try:
+            if reply_message is not None:
+                await reply_message.reply_text(text, reply_markup=markup)
+            else:
+                await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        except Exception as exc:
+            logger.error(
+                "category_selection_prompt_failed",
+                extra={"event_name": "category_selection_prompt_failed", "exception_type": type(exc).__name__},
+            )
+
+    async def process_selected_upload(
+        self,
+        upload: Any,
+        category_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        reply_message: Any | None,
+    ) -> None:
+        """Resume a category-pending upload only after its owner chose a valid category."""
+        del category_id
+        await self._process_upload(
+            upload.upload_id,
+            upload.owner_user_id,
+            upload.owner_user_id,
+            upload.media_group_id,
+            context.bot,
+            reply_message,
+        )
+
     def _pre_copy_rejection(
         self, message: Any, media: _MessageMedia
     ) -> tuple[str, str] | None:
@@ -375,6 +423,36 @@ class UploadHandler:
                     return
                 if upload.status == "collecting":
                     upload = await self.pending.transition(upload_id, "ready")
+                if upload.category_selection_pending:
+                    return
+                if upload.category_id is None:
+                    await self.categories.ensure_default_storage_channel(
+                        self.settings.storage_channel_id
+                    )
+                    categories = await self.categories.list()
+                    if len(categories) == 1:
+                        assigned = await self.pending.repository.assign_category(
+                            upload_id,
+                            owner_user_id=user_id,
+                            category_id=categories[0].id,
+                        )
+                        if not assigned:
+                            return
+                        upload = await self.pending.repository.get(upload_id)
+                        if upload is None:
+                            return
+                    else:
+                        marked = await self.pending.repository.mark_category_selection_pending(
+                            upload_id, owner_user_id=user_id
+                        )
+                        if marked:
+                            await self._send_category_selection(
+                                upload, categories, bot, chat_id, reply_message
+                            )
+                        return
+                category = await self.categories.get(upload.category_id)
+                if category is None or category.storage_channel_id is None:
+                    raise RuntimeError("Upload category storage is not configured")
                 if upload.status == "ready":
                     upload = await self.pending.transition(upload_id, "processing")
             except asyncio.CancelledError:
@@ -455,7 +533,7 @@ class UploadHandler:
                 if not is_album:
                     copied = (
                         await bot.copy_message(
-                            chat_id=self.settings.storage_channel_id,
+                            chat_id=category.storage_channel_id,
                             from_chat_id=ordered_messages[0].source_chat_id,
                             message_id=ordered_messages[0].source_message_id,
                             protect_content=False,
@@ -463,7 +541,7 @@ class UploadHandler:
                     )
                 else:
                     copied = await bot.copy_messages(
-                        chat_id=self.settings.storage_channel_id,
+                        chat_id=category.storage_channel_id,
                         from_chat_id=ordered_messages[0].source_chat_id,
                         message_ids=[part.source_message_id for part in ordered_messages],
                         protect_content=False,
@@ -489,7 +567,7 @@ class UploadHandler:
                 )
                 references = tuple(
                     StorageMessageRef(
-                        self.settings.storage_channel_id,
+                        category.storage_channel_id,
                         int(message_id),
                         part.sequence,
                     )
@@ -513,6 +591,8 @@ class UploadHandler:
                     protect_content=self.settings.default_protect_content,
                     sha256=None,
                     files=item_files,
+                    category_id=category.id,
+                    storage_channel_id=category.storage_channel_id,
                 )
                 saved = await self.items.create_stored_item(
                     item,
@@ -607,7 +687,8 @@ class UploadHandler:
         notify: bool = True,
     ) -> None:
         logger.error(
-            "storage_copy_failed",
+            "storage_copy_failed (%s)",
+            error_type,
             extra={
                 "event_name": "storage_copy_failed",
                 "exception_type": error_type,
@@ -668,9 +749,21 @@ class UploadHandler:
 
     async def recover(self, application: Any) -> None:
         """Resume settled collecting uploads after a restart; discard uncertain copies."""
+        await self.categories.ensure_default_storage_channel(
+            self.settings.storage_channel_id
+        )
         recoverable = await self.pending.list_recoverable(pipeline="m2")
         now_ms = time.time_ns() // 1_000_000
         for upload in recoverable:
+            if upload.category_selection_pending:
+                await self._send_category_selection(
+                    upload,
+                    await self.categories.list(),
+                    application.bot,
+                    upload.owner_user_id,
+                    None,
+                )
+                continue
             if not upload.messages:
                 await self._fail_upload(
                     upload.upload_id,

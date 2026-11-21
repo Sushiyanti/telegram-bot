@@ -85,16 +85,21 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("Item ID must be a positive numeric ID.")
         return
 
-    references = await ItemRepository(_database(context)).delete(item_id)
+    items = ItemRepository(_database(context))
+    item = await items.get(item_id)
+    if item is None:
+        await message.reply_text("Item not found.")
+        return
+    expected_storage_id = item.storage_channel_id or _settings(context).storage_channel_id
+    references = await items.delete(item_id)
     if references is None:
         await message.reply_text("Item not found.")
         return
 
-    settings = _settings(context)
     failed = 0
     deleted = 0
     for reference in references:
-        if reference.chat_id != settings.storage_channel_id:
+        if reference.chat_id != expected_storage_id:
             failed += 1
             logger.error("item_storage_delete_skipped (unexpected chat ID)")
             continue

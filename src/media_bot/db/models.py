@@ -36,6 +36,8 @@ class MediaItem:
     created_at_ms: int | None = None
     sha256: bytes | None = None
     files: tuple[ItemFile, ...] = ()
+    category_id: int | None = None
+    storage_channel_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,3 +130,5 @@ class PendingUpload:
     finished_at_ms: int | None = None
     error_code: str | None = None
     pipeline: str = "legacy"
+    category_id: int | None = None
+    category_selection_pending: bool = False

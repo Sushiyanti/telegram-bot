@@ -5,13 +5,31 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    TypeHandler,
+    filters,
+)
 
 from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
 from media_bot.handlers.admin import delete_command, list_command
+from media_bot.handlers.categories import (
+    add_category_command,
+    add_requirement_command,
+    category_selection_callback,
+    delete_category_callback,
+    delete_category_command,
+    link_category_command,
+)
 from media_bot.handlers.diagnostics import configcheck_command, whoami_command
+from media_bot.handlers.policy import enforce_user_command_policy, toggle_commands_command
+from media_bot.handlers.reactions import ReactionUpdateHandler
 from media_bot.handlers.sharing import (
     adduser_command,
     redeem_command,
@@ -53,6 +71,9 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["settings"] = settings
     application.bot_data["database"] = database
     application.bot_data["upload_handler"] = upload_handler
+    application.bot_data["reaction_update_handler"] = ReactionUpdateHandler(database)
+
+    application.add_handler(TypeHandler(Update, enforce_user_command_policy), group=-1)
 
     application.add_handler(CommandHandler("start", start_command))
     private_commands = filters.ChatType.PRIVATE
@@ -70,6 +91,27 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(
         CommandHandler("delete", admin_only(delete_command), filters=private_commands)
     )
+    application.add_handler(
+        CommandHandler("addcategory", admin_only(add_category_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("linkcategory", admin_only(link_category_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("addrequirement", admin_only(add_requirement_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("delcategory", admin_only(delete_category_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("togglecommands", admin_only(toggle_commands_command), filters=private_commands)
+    )
+    application.add_handler(
+        CallbackQueryHandler(delete_category_callback, pattern=r"^delcat:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(category_selection_callback, pattern=r"^uselect:")
+    )
     application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("configcheck", configcheck_command))
     upload_filter = filters.ChatType.PRIVATE & (
@@ -82,5 +124,9 @@ def build_application(settings: Settings) -> Application:
         | filters.VIDEO_NOTE
     )
     application.add_handler(MessageHandler(upload_filter, upload_handler.handle_message))
+    application.add_handler(
+        TypeHandler(Update, application.bot_data["reaction_update_handler"].handle_update),
+        group=1,
+    )
     application.add_error_handler(error_handler)
     return application

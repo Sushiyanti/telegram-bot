@@ -135,9 +135,9 @@ async def create_link(
     )).token
 
 
-async def test_schema_v4_has_uploader_and_rate_limit_tables(database: Database) -> None:
+async def test_schema_v5_has_uploader_and_rate_limit_tables(database: Database) -> None:
     version, writable = await database.health_check()
-    assert version == 4
+    assert version == 5
     assert writable
     async with database.connection() as connection:
         rows = await (await connection.execute(
