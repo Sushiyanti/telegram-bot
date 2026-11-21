@@ -5,6 +5,7 @@ import logging
 import math
 import re
 import secrets
+import time
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -25,8 +26,10 @@ from media_bot.db.rules import (
 logger = logging.getLogger(__name__)
 _PANEL_KEY = "m6_admin_panel"
 _PAGE_SIZE = 6
+_PENDING_TIMEOUT_SECONDS = 300
 _MAX_ID = (1 << 63) - 1
 _NUMERIC_ID = re.compile(r"^[0-9]{1,19}$")
+_SIGNED_NUMERIC_ID = re.compile(r"^-?[0-9]{1,19}$")
 
 
 def _database(context: ContextTypes.DEFAULT_TYPE) -> Database:
@@ -40,6 +43,35 @@ def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
 def _panel(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
     value = context.user_data.get(_PANEL_KEY)
     return value if isinstance(value, dict) else None
+
+
+def _has_pending_flow(state: dict[str, Any]) -> bool:
+    return isinstance(state.get("input"), dict) or isinstance(state.get("wizard"), dict)
+
+
+def _touch_pending_flow(state: dict[str, Any]) -> None:
+    if _has_pending_flow(state):
+        state["pending_last_activity"] = time.monotonic()
+    else:
+        state.pop("pending_last_activity", None)
+
+
+def _expire_pending_flow(state: dict[str, Any]) -> bool:
+    """Clear an idle user-data wizard and reset the panel to its home view."""
+    if not _has_pending_flow(state):
+        return False
+    last_activity = state.get("pending_last_activity")
+    now = time.monotonic()
+    if (
+        not isinstance(last_activity, (int, float))
+        or now - float(last_activity) >= _PENDING_TIMEOUT_SECONDS
+    ):
+        state.update({"input": None, "wizard": None, "view": "home", "closed": False})
+        state["nonce"] = secrets.token_hex(4)
+        state.pop("pending_last_activity", None)
+        return True
+    state["pending_last_activity"] = now
+    return False
 
 
 def _callback(state: dict[str, Any], action: str, *values: object) -> str:
@@ -85,7 +117,9 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             "view": "home",
             "closed": False,
             "input": None,
+            "wizard": None,
         })
+        _touch_pending_flow(state)
         await _edit_panel(
             context,
             state,
@@ -102,6 +136,7 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "view": "home",
         "closed": False,
         "input": None,
+        "wizard": None,
     }
     context.user_data[_PANEL_KEY] = state
     try:
@@ -153,7 +188,11 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await query.answer()
+    if _expire_pending_flow(state):
+        await _edit_panel(context, state, "Admin Control Panel", _home_markup(state), query=query)
+        return
     state["nonce"] = secrets.token_hex(4)
+    _touch_pending_flow(state)
     action, *args = parts[2:]
     try:
         await _dispatch_callback(action, args, query, context, state)
@@ -178,21 +217,25 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     state = _panel(context)
     if user is None or message is None or chat is None or state is None:
         return
-    pending = state.get("input")
-    if not isinstance(pending, dict):
-        return
     if getattr(chat, "type", None) != "private" or int(chat.id) != int(state.get("chat_id", 0)):
         return
     if int(state.get("owner_user_id", 0)) != int(user.id):
         return
     if not await is_admin(int(user.id), _database(context)):
-        state["input"] = None
+        _clear_pending_flow(state)
         await _audit_denial(_database(context), int(user.id), "admin_panel_input")
         return
     if state.get("closed"):
-        state["input"] = None
+        _clear_pending_flow(state)
+        return
+    if _expire_pending_flow(state):
+        await _edit_panel(context, state, "Admin Control Panel", _home_markup(state))
+        return
+    pending = state.get("input")
+    if not isinstance(pending, dict):
         return
     state["nonce"] = secrets.token_hex(4)
+    _touch_pending_flow(state)
 
     if pending.get("kind") in {"add_admin", "add_uploader"}:
         target_id = _forwarded_user_id(message)
@@ -208,10 +251,13 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             raise ApplicationHandlerStop
         actor_id = int(user.id)
         if pending["kind"] == "add_admin":
-            changed = await AdminRepository(_database(context)).add(
-                user_id=target_id, added_by=actor_id
-            )
-            result = "Administrator added successfully." if changed else "That user is already an administrator."
+            if target_id in _settings(context).admin_ids:
+                result = "That user is already an environment super-admin."
+            else:
+                changed = await AdminRepository(_database(context)).add(
+                    user_id=target_id, added_by=actor_id
+                )
+                result = "Administrator added successfully." if changed else "User is already an admin."
             await _show_staff(context, state, "admins", int(state.get("page", 0)), notice=result)
         else:
             changed = await UploaderRepository(_database(context)).add(
@@ -222,44 +268,45 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         state["input"] = None
         raise ApplicationHandlerStop
 
-    if pending.get("kind") == "add_requirement":
-        rule = await _parse_rule_input(
-            getattr(message, "text", None),
-            category_id=pending.get("category_id"),
-        )
-        if rule is None:
+    if pending.get("kind") == "rule_target":
+        wizard = state.get("wizard")
+        if not isinstance(wizard, dict):
+            _clear_pending_flow(state)
+            await _edit_panel(context, state, "Admin Control Panel", _home_markup(state))
+            return
+        rule_type = str(wizard.get("type", ""))
+        target = _forwarded_target_id(message, rule_type)
+        if target is None and not _is_forwarded_message(message):
+            target = _parse_rule_target(getattr(message, "text", None), rule_type)
+        if target is None:
+            if _is_forwarded_message(message):
+                error = (
+                    "That forwarded message doesn't match this rule type or expose an ID. "
+                    "Forward a channel for JOIN_CHAT/REACT, a user for START_BOT, "
+                    "or paste a numeric ID."
+                )
+            else:
+                error = "I couldn't find a target ID. Forward a message from the channel/user or paste a numeric ID."
             await _edit_panel(
                 context,
                 state,
-                "Invalid rule. Send: TYPE TARGET IS_FAKE WAIT_SECONDS; for REACT you may append LAST_X_MESSAGES LAST_X_DAYS.",
+                error,
                 _input_markup(state),
             )
             raise ApplicationHandlerStop
-        try:
-            created = await RequirementRepository(_database(context)).create(**rule)
-        except (InvalidRecord, RecordNotFound, ValueError) as exc:
-            await _edit_panel(context, state, f"Rule was not added: {exc}", _input_markup(state))
-            raise ApplicationHandlerStop
-        category_id = pending.get("category_id")
-        scope_name = "Global" if category_id is None else str(pending.get("scope_name", "Category"))
-        await _audit(
-            _database(context),
-            int(user.id),
-            "requirement_created",
-            str(created.id),
-            target_type="requirement",
-        )
+        wizard["target"] = target
         state["input"] = None
-        await _show_requirements(
-            context,
-            state,
-            category_id,
-            notice=f"Requirement {created.id} added to {scope_name}.",
-        )
+        await _show_rule_verification(context, state)
         raise ApplicationHandlerStop
 
     state["input"] = None
     raise ApplicationHandlerStop
+
+
+def _clear_pending_flow(state: dict[str, Any]) -> None:
+    state["input"] = None
+    state["wizard"] = None
+    state.pop("pending_last_activity", None)
 
 
 def _forwarded_user_id(message: Any) -> int | None:
@@ -273,6 +320,39 @@ def _forwarded_user_id(message: Any) -> int | None:
     sender = getattr(message, "forward_from", None)
     if sender is not None:
         candidate = getattr(sender, "id", None)
+        return candidate if _valid_user_id(candidate) else None
+    return None
+
+
+def _is_forwarded_message(message: Any) -> bool:
+    return any(
+        getattr(message, field, None) is not None
+        for field in ("forward_origin", "forward_from_chat", "forward_from", "forward_sender_name")
+    )
+
+
+def _forwarded_target_id(message: Any, requirement_type: str) -> int | None:
+    expected_origin = "user" if requirement_type == "START_BOT" else "channel"
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        if getattr(origin, "type", None) != expected_origin:
+            return None
+        if expected_origin == "channel":
+            candidate = getattr(getattr(origin, "chat", None), "id", None)
+            return candidate if _valid_chat_id(candidate) else None
+        candidate = getattr(getattr(origin, "sender_user", None), "id", None)
+        return candidate if _valid_user_id(candidate) else None
+    forwarded_chat = getattr(message, "forward_from_chat", None)
+    if forwarded_chat is not None:
+        if expected_origin != "channel":
+            return None
+        candidate = getattr(forwarded_chat, "id", None)
+        return candidate if _valid_chat_id(candidate) else None
+    forwarded_user = getattr(message, "forward_from", None)
+    if forwarded_user is not None:
+        if expected_origin != "user":
+            return None
+        candidate = getattr(forwarded_user, "id", None)
         return candidate if _valid_user_id(candidate) else None
     return None
 
@@ -295,29 +375,27 @@ def _valid_user_id(value: object) -> bool:
     )
 
 
-async def _parse_rule_input(value: object, *, category_id: object) -> dict[str, Any] | None:
+def _valid_chat_id(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value != 0
+        and abs(value) <= _MAX_ID
+    )
+
+
+def _parse_rule_target(value: object, requirement_type: str) -> int | None:
     if not isinstance(value, str):
         return None
-    parts = value.split()
-    if len(parts) not in {4, 6}:
+    raw = value.strip()
+    if _SIGNED_NUMERIC_ID.fullmatch(raw) is None:
         return None
-    kind, target, fake, wait = parts[:4]
-    kind = kind.upper()
-    if kind not in {"JOIN_CHAT", "REACT", "START_BOT", "TIMED_WAIT"}:
+    parsed = int(raw)
+    if not _valid_chat_id(parsed):
         return None
-    if fake.lower() not in {"true", "false"} or not wait.isascii() or not wait.isdecimal():
+    if requirement_type == "START_BOT" and parsed < 0:
         return None
-    if len(parts) == 6 and (kind != "REACT" or any(not p.isascii() or not p.isdecimal() for p in parts[4:])):
-        return None
-    return {
-        "category_id": category_id,
-        "requirement_type": kind,
-        "target": target,
-        "is_fake": fake.lower() == "true",
-        "wait_seconds": int(wait),
-        "last_x_messages": int(parts[4]) if len(parts) == 6 else None,
-        "last_x_days": int(parts[5]) if len(parts) == 6 else None,
-    }
+    return parsed
 
 
 async def _dispatch_callback(
@@ -330,10 +408,11 @@ async def _dispatch_callback(
     if action == "close":
         state["closed"] = True
         state["view"] = "closed"
-        state["input"] = None
+        _clear_pending_flow(state)
         await _edit_panel(context, state, "Admin panel closed.", None, query=query)
     elif action == "home":
-        state.update({"view": "home", "input": None})
+        _clear_pending_flow(state)
+        state.update({"view": "home"})
         await _edit_panel(context, state, "Admin Control Panel", _home_markup(state), query=query)
     elif action == "categories":
         await _show_categories(context, state, _int_arg(args, 0, 0), query=query)
@@ -362,7 +441,7 @@ async def _dispatch_callback(
     elif action == "reqadd":
         await _start_requirement_input(context, state, _scope_from_arg(args, 0), query=query)
     elif action == "reqdelconfirm":
-        await _show_requirement_delete(
+        await _begin_requirement_delete(
             context,
             state,
             _scope_from_arg(args, 0),
@@ -378,6 +457,36 @@ async def _dispatch_callback(
             _str_arg(args, 2),
             query=query,
         )
+    elif action == "rule_type":
+        await _select_rule_type(context, state, _str_arg(args, 0), query=query)
+    elif action == "rule_verify":
+        await _select_rule_verification(context, state, _str_arg(args, 0), query=query)
+    elif action == "rule_continue":
+        await _show_rule_wait(context, state, query=query)
+    elif action == "rule_fake":
+        wizard = _require_rule_wizard(state)
+        wizard["is_fake"] = True
+        await _show_rule_wait(context, state, query=query)
+    elif action == "rule_wait":
+        await _set_rule_wait(context, state, _int_arg(args, 0), query=query)
+    elif action == "rule_wait_done":
+        wizard = _require_rule_wizard(state)
+        if wizard.get("type") == "REACT":
+            await _show_react_windows(context, state, query=query)
+        else:
+            await _show_rule_confirmation(context, state, query=query)
+    elif action == "rule_message_window":
+        await _set_react_window(context, state, "last_x_messages", _int_arg(args, 0), query=query)
+    elif action == "rule_day_window":
+        await _set_react_window(context, state, "last_x_days", _int_arg(args, 0), query=query)
+    elif action == "rule_windows_done":
+        await _show_rule_confirmation(context, state, query=query)
+    elif action == "rule_save":
+        await _save_rule(context, state, query=query)
+    elif action == "rule_cancel":
+        scope_id = state.get("scope_id")
+        _clear_pending_flow(state)
+        await _show_requirements(context, state, scope_id, query=query, notice="Rule creation cancelled.")
     elif action == "staff":
         await _show_staff_menu(context, state, query=query)
     elif action == "staffrole":
@@ -397,7 +506,7 @@ async def _dispatch_callback(
     elif action == "unlock":
         await _set_lockdown(context, state, False, query=query)
     elif action == "inputcancel":
-        state["input"] = None
+        _clear_pending_flow(state)
         if state.get("view") == "input_staff_admin":
             await _show_staff(context, state, "admins", int(state.get("page", 0)), query=query)
         elif state.get("view") == "input_staff_uploader":
@@ -651,25 +760,290 @@ async def _start_requirement_input(
             return
         category_name = category.name
     state.update({
-        "view": "input_requirement",
+        "view": "rule_wizard_type",
         "scope_id": category_id,
         "scope_name": category_name,
-        "input": {"kind": "add_requirement", "category_id": category_id, "scope_name": category_name},
+        "input": None,
+        "wizard": {"category_id": category_id, "scope_name": category_name, "step": "type"},
     })
+    _touch_pending_flow(state)
+    rows = [
+        [_button("Join a Channel", state, "rule_type", "JOIN_CHAT")],
+        [_button("React to Posts", state, "rule_type", "REACT")],
+        [_button("Start a Bot", state, "rule_type", "START_BOT")],
+        [_button("Timed Wait", state, "rule_type", "TIMED_WAIT")],
+        [_button("Cancel", state, "rule_cancel")],
+    ]
     await _edit_panel(
         context,
         state,
-        f"Add a rule to {category_name}. Send: TYPE TARGET IS_FAKE WAIT_SECONDS. For REACT, optionally append LAST_X_MESSAGES LAST_X_DAYS. TIMED_WAIT uses target -.",
-        _input_markup(state),
+        f"Add a rule to {category_name}. Choose its type:",
+        _markup(rows),
         query=query,
     )
 
 
 def _input_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
-    return _markup([[_button("Cancel", state, "inputcancel")]])
+    action = "rule_cancel" if isinstance(state.get("wizard"), dict) else "inputcancel"
+    return _markup([[_button("Cancel", state, action)]])
 
 
-async def _show_requirement_delete(
+def _require_rule_wizard(state: dict[str, Any]) -> dict[str, Any]:
+    wizard = state.get("wizard")
+    if not isinstance(wizard, dict):
+        raise ValueError("The rule wizard has expired")
+    return wizard
+
+
+async def _select_rule_type(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    rule_type: str,
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    if rule_type not in {"JOIN_CHAT", "REACT", "START_BOT", "TIMED_WAIT"}:
+        raise ValueError("Unknown rule type")
+    wizard.update({"type": rule_type, "step": "target"})
+    if rule_type == "TIMED_WAIT":
+        wizard["target"] = None
+        state["input"] = None
+        await _show_rule_verification(context, state, query=query)
+        return
+    state.update({"view": "rule_wizard_target", "input": {"kind": "rule_target"}})
+    _touch_pending_flow(state)
+    if rule_type in {"JOIN_CHAT", "REACT"}:
+        prompt = "Forward a message from the target channel, or paste its numeric chat ID."
+    else:
+        prompt = "Forward a message from the target user, or paste the user's numeric ID."
+    await _edit_panel(context, state, prompt, _input_markup(state), query=query)
+
+
+async def _show_rule_verification(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    rule_type = str(wizard.get("type"))
+    wizard["step"] = "verification"
+    state.update({"view": "rule_wizard_verification", "input": None})
+    rows: list[list[InlineKeyboardButton]] = []
+    if rule_type == "START_BOT":
+        rows.append([_button("Fake (Wait Only)", state, "rule_verify", "fake")])
+        text = "Real START_BOT verification is not supported. Choose Fake (wait-only)."
+    else:
+        rows.append([
+            _button("Real", state, "rule_verify", "real"),
+            _button("Fake", state, "rule_verify", "fake"),
+        ])
+        text = "Choose how this rule is verified: Real checks eligibility; Fake only waits."
+    rows.append([_button("Cancel", state, "rule_cancel")])
+    await _edit_panel(context, state, text, _markup(rows), query=query)
+
+
+async def _select_rule_verification(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    mode: str,
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    if mode not in {"real", "fake"}:
+        raise ValueError("Unknown verification mode")
+    rule_type = str(wizard.get("type"))
+    if rule_type == "START_BOT" and mode == "real":
+        raise InvalidRecord("Real START_BOT verification is not supported")
+    wizard["is_fake"] = mode == "fake"
+    if rule_type == "JOIN_CHAT" and mode == "real":
+        target = wizard.get("target")
+        if not isinstance(target, int) or not await _bot_is_chat_admin(context, target):
+            wizard["step"] = "join_warning"
+            state["view"] = "rule_wizard_admin_warning"
+            rows = [
+                [_button("Continue Anyway", state, "rule_continue")],
+                [_button("Use Fake", state, "rule_fake")],
+                [_button("Cancel", state, "rule_cancel")],
+            ]
+            await _edit_panel(
+                context,
+                state,
+                "⚠️ Bot is not admin in this channel. Real checks will fail.",
+                _markup(rows),
+                query=query,
+            )
+            return
+    await _show_rule_wait(context, state, query=query)
+
+
+async def _bot_is_chat_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+    bot = context.bot
+    bot_id = getattr(bot, "id", None)
+    try:
+        if not isinstance(bot_id, int) or bot_id <= 0:
+            bot_id = int((await bot.get_me()).id)
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
+    except Exception:
+        return False
+    return getattr(member, "status", None) in {"administrator", "creator"}
+
+
+async def _show_rule_wait(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    wait_seconds = int(wizard.get("wait_seconds", 0))
+    wizard.update({"step": "wait", "wait_seconds": wait_seconds})
+    state.update({"view": "rule_wizard_wait", "input": None})
+    options = (0, 1, 3, 5, 10, 30, 60)
+    rows = [
+        [_button(f"{'✓ ' if value == wait_seconds else ''}{value}s", state, "rule_wait", value)
+         for value in options[:4]],
+        [_button(f"{'✓ ' if value == wait_seconds else ''}{value}s", state, "rule_wait", value)
+         for value in options[4:]],
+        [_button("Continue", state, "rule_wait_done")],
+        [_button("Cancel", state, "rule_cancel")],
+    ]
+    await _edit_panel(context, state, "Choose the wait time before delivery:", _markup(rows), query=query)
+
+
+async def _set_rule_wait(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    wait_seconds: int,
+    *,
+    query: Any = None,
+) -> None:
+    if wait_seconds not in {0, 1, 3, 5, 10, 30, 60}:
+        raise ValueError("Unsupported wait-time option")
+    _require_rule_wizard(state)["wait_seconds"] = wait_seconds
+    await _show_rule_wait(context, state, query=query)
+
+
+async def _show_react_windows(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    wizard.setdefault("last_x_messages", 5)
+    wizard.setdefault("last_x_days", 0)
+    wizard["step"] = "react_windows"
+    state.update({"view": "rule_wizard_react_windows", "input": None})
+    messages = (0, 3, 5, 10, 20, 50, 100)
+    days = (0, 1, 7, 30, 90)
+    rows = [
+        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}Messages {value}",
+                 state, "rule_message_window", value) for value in messages[:4]],
+        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}Messages {value}",
+                 state, "rule_message_window", value) for value in messages[4:]],
+        [_button(f"{'✓ ' if wizard['last_x_days'] == value else ''}Days {value}",
+                 state, "rule_day_window", value) for value in days],
+        [_button("Continue", state, "rule_windows_done")],
+        [_button("Cancel", state, "rule_cancel")],
+    ]
+    await _edit_panel(
+        context,
+        state,
+        "Choose the REACT window. A zero value disables that limit.",
+        _markup(rows),
+        query=query,
+    )
+
+
+async def _set_react_window(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    setting: str,
+    value: int,
+    *,
+    query: Any = None,
+) -> None:
+    allowed = {
+        "last_x_messages": {0, 3, 5, 10, 20, 50, 100},
+        "last_x_days": {0, 1, 7, 30, 90},
+    }
+    if setting not in allowed or value not in allowed[setting]:
+        raise ValueError("Unsupported REACT window")
+    _require_rule_wizard(state)[setting] = value
+    await _show_react_windows(context, state, query=query)
+
+
+async def _show_rule_confirmation(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    rule_type = str(wizard.get("type"))
+    target = wizard.get("target")
+    verification = "Fake (wait only)" if wizard.get("is_fake") else "Real"
+    lines = [
+        "Confirm rule",
+        f"Type: {rule_type}",
+        f"Target: {target if target is not None else 'Not applicable'}",
+        f"Verification: {verification}",
+        f"Wait: {wizard.get('wait_seconds', 0)} seconds",
+    ]
+    if rule_type == "REACT":
+        lines.append(
+            f"Window: last {wizard.get('last_x_messages', 5)} posts / "
+            f"{wizard.get('last_x_days', 0)} days"
+        )
+    wizard["step"] = "confirm"
+    state.update({"view": "rule_wizard_confirm", "input": None})
+    rows = [
+        [_button("Save Rule", state, "rule_save")],
+        [_button("Cancel", state, "rule_cancel")],
+    ]
+    await _edit_panel(context, state, "\n".join(lines), _markup(rows), query=query)
+
+
+async def _save_rule(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    rule_type = str(wizard["type"])
+    created = await RequirementRepository(_database(context)).create(
+        category_id=wizard.get("category_id"),
+        requirement_type=rule_type,
+        target=wizard.get("target"),
+        is_fake=bool(wizard.get("is_fake")),
+        wait_seconds=int(wizard.get("wait_seconds", 0)),
+        last_x_messages=int(wizard.get("last_x_messages", 5)) if rule_type == "REACT" else None,
+        last_x_days=int(wizard.get("last_x_days", 0)) if rule_type == "REACT" else None,
+    )
+    category_id = wizard.get("category_id")
+    scope_name = str(wizard.get("scope_name", "Global"))
+    await _audit(
+        _database(context),
+        int(state["owner_user_id"]),
+        "requirement_created",
+        str(created.id),
+        target_type="requirement",
+    )
+    _clear_pending_flow(state)
+    await _show_requirements(
+        context,
+        state,
+        category_id,
+        query=query,
+        notice=f"Requirement {created.id} added to {scope_name}.",
+    )
+
+
+async def _begin_requirement_delete(
     context: ContextTypes.DEFAULT_TYPE,
     state: dict[str, Any],
     category_id: int | None,
@@ -677,20 +1051,41 @@ async def _show_requirement_delete(
     *,
     query: Any = None,
 ) -> None:
-    requirement = await RequirementRepository(_database(context)).get(requirement_id)
+    repository = RequirementRepository(_database(context))
+    requirement = await repository.get(requirement_id)
     if requirement is None:
         await _show_requirements(context, state, category_id, query=query, notice="Requirement no longer exists.")
         return
-    state.update({"view": "requirement_delete", "scope_id": category_id})
+    scopes = await repository.scopes_for(requirement_id)
+    current_scope = "Global"
+    if category_id is not None:
+        category = await CategoryRepository(_database(context)).get(category_id)
+        current_scope = category.name if category is not None else f"Category {category_id}"
+    if current_scope not in scopes:
+        await _show_requirements(
+            context,
+            state,
+            category_id,
+            query=query,
+            notice="This rule is no longer attached to the selected scope.",
+        )
+        return
     scope_token = "g" if category_id is None else category_id
+    if len(scopes) == 1:
+        await _delete_requirement(context, state, category_id, requirement_id, "unlink", query=query)
+        return
+    other_scopes = [scope for scope in scopes if scope != current_scope]
+    state.update({"view": "requirement_shared_delete", "scope_id": category_id})
     rows = [
-        [_button("Confirm Delete", state, "reqdeletedo", scope_token, requirement_id, "yes")],
-        [_button("Cancel", state, "reqdeletedo", scope_token, requirement_id, "no")],
+        [_button("Unlink Here", state, "reqdeletedo", scope_token, requirement_id, "unlink")],
+        [_button("Delete Everywhere", state, "reqdeletedo", scope_token, requirement_id, "all")],
+        [_button("Cancel", state, "reqdeletedo", scope_token, requirement_id, "cancel")],
     ]
     await _edit_panel(
         context,
         state,
-        f"Remove requirement #{requirement_id} from this scope? Other scope associations will remain.",
+        f"Rule #{requirement_id} is also used in {', '.join(other_scopes)}.\n"
+        "Unlink it only here, or delete the rule from every scope?",
         _markup(rows),
         query=query,
     )
@@ -705,7 +1100,7 @@ async def _delete_requirement(
     *,
     query: Any = None,
 ) -> None:
-    if choice == "yes":
+    if choice == "unlink":
         removed = await RequirementRepository(_database(context)).remove_from_scope(
             category_id=category_id,
             requirement_id=requirement_id,
@@ -714,16 +1109,32 @@ async def _delete_requirement(
             await _audit(
                 _database(context),
                 int(state["owner_user_id"]),
-                "requirement_removed",
+                "requirement_unlinked",
                 str(requirement_id),
                 target_type="requirement",
             )
+        notice = "Requirement unlinked from this scope." if removed else "Rule was not attached to this scope."
+    elif choice == "all":
+        removed = await RequirementRepository(_database(context)).remove_everywhere(requirement_id)
+        if removed:
+            await _audit(
+                _database(context),
+                int(state["owner_user_id"]),
+                "requirement_deleted_everywhere",
+                str(requirement_id),
+                target_type="requirement",
+            )
+        notice = "Requirement deleted everywhere." if removed else "Requirement no longer exists."
+    elif choice == "cancel":
+        notice = "Deletion cancelled."
+    else:
+        raise ValueError("Unknown requirement deletion choice")
     await _show_requirements(
         context,
         state,
         category_id,
         query=query,
-        notice="Requirement removed from this scope." if choice == "yes" else "Deletion cancelled.",
+        notice=notice,
     )
 
 
@@ -793,7 +1204,8 @@ async def _show_staff(
         lines.append(f"\n{notice}")
     if pages > 1:
         rows.append(_page_row(state, "staffpage", page, pages))
-    rows.append([_button("Add", state, "staffadd", "admins" if role == "admins" else "uploaders")])
+    add_label = "Add Admin" if role == "admins" else "Add Uploader"
+    rows.append([_button(add_label, state, "staffadd", "admins" if role == "admins" else "uploaders")])
     rows.append([_button("Back to Staff", state, "staff")])
     await _edit_panel(context, state, "\n".join(lines), _markup(rows), query=query)
 
@@ -810,6 +1222,7 @@ async def _start_staff_input(
     view = "input_staff_admin" if role == "admins" else "input_staff_uploader"
     label = "administrator" if role == "admins" else "uploader"
     state.update({"view": view, "role": role, "input": {"kind": "add_admin" if role == "admins" else "add_uploader"}})
+    _touch_pending_flow(state)
     await _edit_panel(
         context,
         state,
@@ -831,7 +1244,7 @@ async def _remove_staff(
     settings = _settings(context)
     if role == "admins":
         if user_id in settings.admin_ids:
-            await _show_staff(context, state, "admins", int(state.get("page", 0)), query=query, notice="Environment super-admins cannot be removed.")
+            await _show_staff(context, state, "admins", int(state.get("page", 0)), query=query, notice="Cannot revoke Environment Super-Admins.")
             return
         changed = await AdminRepository(_database(context)).remove(user_id=user_id, removed_by=actor_id)
         notice = "Administrator removed." if changed else "No database admin role found."

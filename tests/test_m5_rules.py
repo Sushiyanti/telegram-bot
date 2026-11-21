@@ -400,7 +400,7 @@ async def test_start_fake_timed_rule_waits_then_delivers_without_consuming_early
     assert link.use_count == 1
 
 
-async def test_failed_join_requirement_does_not_consume_share_link(database: Database) -> None:
+async def test_real_join_left_refuses_delivery_without_consuming_share_link(database: Database) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -417,9 +417,116 @@ async def test_failed_join_requirement_does_not_consume_share_link(database: Dat
     await start_command(update, context)
 
     bot.copy_message.assert_not_awaited()
+    bot.get_chat_member.assert_awaited_once_with(chat_id=REACT_CHANNEL, user_id=USER_ID)
     link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
     assert link.use_count == 0
     assert "Join" in message.reply_text.await_args.args[0]
+
+
+async def test_start_fake_join_waits_five_seconds_then_delivers(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="JOIN_CHAT",
+        target=REACT_CHANNEL,
+        is_fake=True,
+        wait_seconds=5,
+    )
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    context, bot = start_context(database, token)
+
+    with patch("media_bot.services.rule_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        await start_command(update, context)
+
+    sleep.assert_awaited_once_with(5)
+    bot.get_chat_member.assert_not_awaited()
+    bot.copy_message.assert_awaited_once()
+    assert "Verifying..." in [call.args[0] for call in message.reply_text.await_args_list]
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == 1
+
+
+async def test_start_fake_timed_wait_zero_delivers_without_sleep(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="TIMED_WAIT",
+        target=None,
+        is_fake=True,
+        wait_seconds=0,
+    )
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    context, bot = start_context(database, token)
+
+    with patch("media_bot.services.rule_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        await start_command(update, context)
+
+    sleep.assert_not_awaited()
+    bot.copy_message.assert_awaited_once()
+    assert "Delivered." in [call.args[0] for call in message.reply_text.await_args_list]
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == 1
+
+
+async def test_start_real_react_with_database_reaction_delivers(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="REACT",
+        target=REACT_CHANNEL,
+        is_fake=False,
+        wait_seconds=0,
+        last_x_messages=5,
+        last_x_days=0,
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    reactions = ReactionRepository(database)
+    await reactions.observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
+    await reactions.replace_user_message_reactions(
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        message_id=701,
+        emojis=("👍",),
+        updated_at_ms=now_ms,
+    )
+    token = await share_token(database, item.id)
+    update, _ = start_update(token)
+    bot = bot_stub(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")))
+    context, bot = start_context(database, token, bot)
+
+    await start_command(update, context)
+
+    bot.copy_message.assert_awaited_once()
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == 1
+
+
+async def test_start_real_react_without_database_reaction_refuses_delivery(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="REACT",
+        target=REACT_CHANNEL,
+        is_fake=False,
+        wait_seconds=0,
+        last_x_messages=5,
+        last_x_days=0,
+    )
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    await ReactionRepository(database).observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    bot = bot_stub(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")))
+    context, bot = start_context(database, token, bot)
+
+    await start_command(update, context)
+
+    bot.copy_message.assert_not_awaited()
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == 0
+    assert "React to at least one recent post" in message.reply_text.await_args.args[0]
 
 
 async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(database: Database) -> None:

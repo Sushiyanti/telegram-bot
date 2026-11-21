@@ -311,6 +311,46 @@ class RequirementRepository:
             rows = await cursor.fetchall()
         return tuple(_requirement_from_row(row) for row in rows)
 
+    async def scopes_for(self, requirement_id: int) -> tuple[str, ...]:
+        """Return direct scopes using a requirement, including the Global scope."""
+        _positive_id(requirement_id, "requirement_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                """SELECT category_requirements.category_id, categories.name
+                   FROM category_requirements
+                   LEFT JOIN categories
+                     ON categories.id = category_requirements.category_id
+                   WHERE category_requirements.requirement_id = ?
+                   ORDER BY category_requirements.category_id""",
+                (requirement_id,),
+            )
+            rows = await cursor.fetchall()
+        return tuple(
+            "Global" if row["category_id"] is None else str(row["name"])
+            for row in rows
+        )
+
+    async def remove_everywhere(self, requirement_id: int) -> bool:
+        """Delete a requirement and all direct scope associations atomically."""
+        _positive_id(requirement_id, "requirement_id")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT 1 FROM requirements WHERE id = ?", (requirement_id,)
+            )
+            if await cursor.fetchone() is None:
+                await connection.rollback()
+                return False
+            await connection.execute(
+                "DELETE FROM category_requirements WHERE requirement_id = ?",
+                (requirement_id,),
+            )
+            cursor = await connection.execute(
+                "DELETE FROM requirements WHERE id = ?", (requirement_id,)
+            )
+            await connection.commit()
+        return cursor.rowcount == 1
+
     async def remove_from_scope(
         self, *, category_id: int | None, requirement_id: int
     ) -> bool:
@@ -521,9 +561,14 @@ def _validate_target(requirement_type: str, target: str | int | None) -> str | N
         _chat_id(parsed, "target")
         return str(parsed)
     raw = str(target).strip() if target is not None else ""
-    if not raw.startswith("@") or re.fullmatch(r"@[A-Za-z0-9_]{5,32}", raw) is None:
-        raise InvalidRecord("START_BOT target must be an @username")
-    return raw
+    if raw.startswith("@") and re.fullmatch(r"@[A-Za-z0-9_]{5,32}", raw) is not None:
+        return raw
+    try:
+        numeric_target = int(raw, 10)
+    except (ValueError, TypeError) as exc:
+        raise InvalidRecord("START_BOT target must be an @username or numeric user ID") from exc
+    _positive_id(numeric_target, "START_BOT target")
+    return str(numeric_target)
 
 
 def _emoji_key(value: str) -> str:
