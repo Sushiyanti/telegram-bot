@@ -83,6 +83,7 @@ class ShareLinkService:
         item_id: int,
         created_by_user_id: int,
         expires_at_ms: int | None = None,
+        max_uses: int | None = None,
     ) -> CreatedShareLink:
         """Create a share only for stored items within a verified transfer limit."""
         item = await self.items.get(item_id)
@@ -107,6 +108,7 @@ class ShareLinkService:
             created_by_user_id=created_by_user_id,
             created_at_ms=now,
             expires_at_ms=expires_at_ms,
+            max_uses=max_uses,
         )
         return CreatedShareLink(link=link, token=token)
 
@@ -115,6 +117,12 @@ class ShareLinkService:
         if not isinstance(token, str) or _TOKEN_PATTERN.fullmatch(token) is None:
             return None
         return await self.links.find_active_by_hash(hash_share_token(token), now_ms=_now_ms())
+
+    async def consume(self, token: str) -> ShareLink | None:
+        """Atomically claim one still-valid delivery for a bearer token."""
+        if not isinstance(token, str) or _TOKEN_PATTERN.fullmatch(token) is None:
+            return None
+        return await self.links.consume_by_hash(hash_share_token(token), now_ms=_now_ms())
 
     async def revoke(self, token: str) -> bool:
         """Revoke a bearer link idempotently without exposing the stored digest."""

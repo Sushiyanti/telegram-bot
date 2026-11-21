@@ -7,25 +7,21 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
 from media_bot.handlers.diagnostics import configcheck_command, whoami_command
+from media_bot.handlers.sharing import (
+    adduser_command,
+    redeem_command,
+    revoke_command,
+    share_command,
+    start_command,
+)
 from media_bot.handlers.uploads import UploadHandler
 
 
 logger = logging.getLogger(__name__)
-
-
-async def start_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Explain that upload and sharing workflows remain out of scope."""
-    del context
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text(
-            "This bot is being configured. File sharing is not available yet."
-        )
 
 
 async def error_handler(
@@ -58,6 +54,15 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["upload_handler"] = upload_handler
 
     application.add_handler(CommandHandler("start", start_command))
+    private_commands = filters.ChatType.PRIVATE
+    application.add_handler(CommandHandler("share", share_command, filters=private_commands))
+    application.add_handler(CommandHandler("redeem", redeem_command, filters=private_commands))
+    application.add_handler(
+        CommandHandler("adduser", admin_only(adduser_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("revoke", admin_only(revoke_command), filters=private_commands)
+    )
     application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("configcheck", configcheck_command))
     upload_filter = filters.ChatType.PRIVATE & (

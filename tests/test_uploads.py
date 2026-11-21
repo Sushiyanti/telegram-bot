@@ -12,7 +12,7 @@ from media_bot.application import build_application
 from media_bot.config import Settings
 from media_bot.db.database import Database
 from media_bot.db.models import PendingUploadMessage
-from media_bot.db.repositories import ItemRepository
+from media_bot.db.repositories import ItemRepository, UploaderRepository
 from media_bot.handlers.uploads import UploadHandler
 
 
@@ -134,7 +134,7 @@ async def pending_count(database: Database) -> int:
         ("admin", ADMIN_ID, (), True),
         ("admin", OTHER_ID, (), False),
         ("allowlist", ALLOWLIST_ID, (ALLOWLIST_ID,), True),
-        ("allowlist", ADMIN_ID, (ALLOWLIST_ID,), False),
+        ("allowlist", ADMIN_ID, (ALLOWLIST_ID,), True),
         ("all", OTHER_ID, (), True),
     ],
 )
@@ -512,3 +512,43 @@ async def test_storage_copy_failure_has_audit_and_no_item_or_pending_row(
     rows = await audit_rows(database)
     assert len(rows) == 1
     assert rows[0]["action"] == "storage_copy_failed"
+
+
+async def test_redeemed_uploader_can_upload_through_m2_pipeline(
+    database: Database,
+) -> None:
+    result = await UploaderRepository(database).redeem(
+        user_id=OTHER_ID,
+        supplied_code="one-time-test-code",
+        configured_code="one-time-test-code",
+    )
+    assert result == "success"
+    handler = UploadHandler(make_settings(database.path), database, debounce_seconds=0)
+    bot = make_bot()
+    update, message = make_update(user_id=OTHER_ID)
+
+    await handler.handle_message(update, make_context(bot))
+
+    bot.copy_message.assert_awaited_once()
+    assert message.reply_text.await_args.args[0].startswith("Stored.")
+    item_id = await ItemRepository(database).find_item_id_by_file_unique_id(
+        OTHER_ID, "synthetic-unique-1"
+    )
+    assert item_id is not None
+    await handler.shutdown(None)
+
+
+async def test_configured_uploader_id_joins_union_outside_allowlist_mode(
+    database: Database,
+) -> None:
+    handler = UploadHandler(
+        make_settings(database.path, mode="admin", uploader_ids=(OTHER_ID,)), database
+    )
+    bot = make_bot()
+    update, message = make_update(user_id=OTHER_ID)
+
+    await handler.handle_message(update, make_context(bot))
+
+    bot.copy_message.assert_awaited_once()
+    assert message.reply_text.await_args.args[0].startswith("Stored.")
+    await handler.shutdown(None)

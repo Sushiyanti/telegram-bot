@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import hmac
+from datetime import datetime, timezone
 from dataclasses import replace
 
 import aiosqlite
@@ -16,6 +18,7 @@ from media_bot.db.models import (
     RequiredChat,
     ShareLink,
     StorageMessageRef,
+    UploaderGrant,
 )
 
 
@@ -268,6 +271,7 @@ class ShareLinkRepository:
         created_by_user_id: int,
         created_at_ms: int,
         expires_at_ms: int | None,
+        max_uses: int | None = None,
     ) -> ShareLink:
         _require_positive_int(item_id, "item_id")
         _require_positive_int(created_by_user_id, "created_by_user_id")
@@ -278,18 +282,23 @@ class ShareLinkRepository:
             _require_time(expires_at_ms, "expires_at_ms")
             if expires_at_ms <= created_at_ms:
                 raise InvalidRecord("expires_at_ms must be later than created_at_ms")
+        if max_uses is not None:
+            _require_positive_int(max_uses, "max_uses")
         try:
             async with self.database.connection() as connection:
                 cursor = await connection.execute(
                     """INSERT INTO share_links
-                       (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms),
+                       (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms, max_uses)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms, max_uses),
                 )
                 link_id = int(cursor.lastrowid)
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Share link violates uniqueness or foreign-key constraints") from exc
-        return ShareLink(link_id, item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms, None)
+        return ShareLink(
+            link_id, item_id, token_hash, created_by_user_id, created_at_ms,
+            expires_at_ms, None, 0, max_uses
+        )
 
     async def find_active_by_hash(self, token_hash: bytes, *, now_ms: int) -> ShareLink | None:
         if not isinstance(token_hash, bytes) or len(token_hash) != 32:
@@ -299,10 +308,35 @@ class ShareLinkRepository:
             cursor = await connection.execute(
                 """SELECT * FROM share_links
                    WHERE token_hash = ? AND revoked_at_ms IS NULL
-                     AND (expires_at_ms IS NULL OR expires_at_ms > ?)""",
+                     AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                     AND (max_uses IS NULL OR use_count < max_uses)""",
                 (token_hash, now_ms),
             )
             row = await cursor.fetchone()
+        return None if row is None else _share_link_from_row(row)
+
+    async def consume_by_hash(self, token_hash: bytes, *, now_ms: int) -> ShareLink | None:
+        """Atomically consume one delivery use, refusing expired, revoked, or exhausted links."""
+        if not isinstance(token_hash, bytes) or len(token_hash) != 32:
+            raise InvalidRecord("token_hash must be a 32-byte SHA-256 digest")
+        _require_time(now_ms, "now_ms")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                """UPDATE share_links SET use_count = use_count + 1
+                   WHERE token_hash = ? AND revoked_at_ms IS NULL
+                     AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                     AND (max_uses IS NULL OR use_count < max_uses)""",
+                (token_hash, now_ms),
+            )
+            if cursor.rowcount != 1:
+                await connection.rollback()
+                return None
+            cursor = await connection.execute(
+                "SELECT * FROM share_links WHERE token_hash = ?", (token_hash,)
+            )
+            row = await cursor.fetchone()
+            await connection.commit()
         return None if row is None else _share_link_from_row(row)
 
     async def revoke_by_hash(self, token_hash: bytes, *, revoked_at_ms: int) -> bool:
@@ -325,6 +359,166 @@ class ShareLinkRepository:
             )
             rows = await cursor.fetchall()
         return tuple(_share_link_from_row(row) for row in rows)
+
+
+class UploaderRepository:
+    """Persist uploader grants, redemption throttles, and their audit events."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def is_active(self, user_id: int) -> bool:
+        _require_positive_int(user_id, "user_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM uploaders WHERE user_id = ? AND revoked_at IS NULL",
+                (user_id,),
+            )
+            return await cursor.fetchone() is not None
+
+    async def get(self, user_id: int) -> UploaderGrant | None:
+        _require_positive_int(user_id, "user_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT * FROM uploaders WHERE user_id = ?", (user_id,)
+            )
+            row = await cursor.fetchone()
+        return None if row is None else UploaderGrant(
+            user_id=int(row["user_id"]),
+            added_by=None if row["added_by"] is None else int(row["added_by"]),
+            added_at=str(row["added_at"]),
+            revoked_at=row["revoked_at"],
+        )
+
+    async def add(self, *, user_id: int, added_by: int | None) -> bool:
+        """Insert or restore a grant and append an audit event atomically."""
+        _require_positive_int(user_id, "user_id")
+        if added_by is not None:
+            _require_positive_int(added_by, "added_by")
+        now_ms = _now_ms()
+        added_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+            cursor = await connection.execute(
+                "SELECT revoked_at FROM uploaders WHERE user_id = ?", (user_id,)
+            )
+            existing = await cursor.fetchone()
+            changed = existing is None or existing["revoked_at"] is not None
+            if existing is None:
+                await connection.execute(
+                    "INSERT INTO uploaders (user_id, added_by, added_at) VALUES (?, ?, ?)",
+                    (user_id, added_by, added_at),
+                )
+            elif changed:
+                await connection.execute(
+                    """UPDATE uploaders SET added_by = ?, added_at = ?, revoked_at = NULL
+                       WHERE user_id = ?""",
+                    (added_by, added_at, user_id),
+                )
+            await connection.execute(
+                """INSERT INTO audit_log
+                   (actor_id, action, target_type, target_id, created_at_ms)
+                   VALUES (?, 'uploader_added', 'user', ?, ?)""",
+                (added_by or user_id, str(user_id), now_ms),
+            )
+            await connection.commit()
+        return changed
+
+    async def revoke(self, *, user_id: int, revoked_by: int) -> bool:
+        """Revoke a grant, recording the administrative action atomically."""
+        _require_positive_int(user_id, "user_id")
+        _require_positive_int(revoked_by, "revoked_by")
+        now_ms = _now_ms()
+        revoked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                """UPDATE uploaders SET revoked_at = ?
+                   WHERE user_id = ? AND revoked_at IS NULL""",
+                (revoked_at, user_id),
+            )
+            changed = cursor.rowcount == 1
+            action = "uploader_revoked" if changed else "uploader_revoke_missing"
+            await connection.execute(
+                """INSERT INTO audit_log
+                   (actor_id, action, target_type, target_id, created_at_ms)
+                   VALUES (?, ?, 'user', ?, ?)""",
+                (revoked_by, action, str(user_id), now_ms),
+            )
+            await connection.commit()
+        return changed
+
+    async def redeem(
+        self,
+        *,
+        user_id: int,
+        supplied_code: str,
+        configured_code: str | None,
+        now_ms: int | None = None,
+        cooldown_ms: int = 30_000,
+    ) -> str:
+        """Redeem once per cooldown; return success, invalid, or rate_limited."""
+        _require_positive_int(user_id, "user_id")
+        _validate_text(supplied_code, "supplied_code", max_length=256)
+        if configured_code is not None:
+            _validate_text(configured_code, "configured_code", max_length=256)
+        if isinstance(cooldown_ms, bool) or not isinstance(cooldown_ms, int) or cooldown_ms < 0:
+            raise InvalidRecord("cooldown_ms must be a non-negative integer")
+        attempt_at = _now_ms() if now_ms is None else now_ms
+        _require_time(attempt_at, "now_ms")
+
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await connection.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+            cursor = await connection.execute(
+                "SELECT last_attempt_at_ms FROM redeem_rate_limits WHERE user_id = ?",
+                (user_id,),
+            )
+            previous = await cursor.fetchone()
+            if previous is not None and attempt_at - int(previous["last_attempt_at_ms"]) < cooldown_ms:
+                await connection.execute(
+                    """INSERT INTO audit_log
+                       (actor_id, action, target_type, target_id, created_at_ms)
+                       VALUES (?, 'redeem_fail', 'user', ?, ?)""",
+                    (user_id, str(user_id), attempt_at),
+                )
+                await connection.commit()
+                return "rate_limited"
+
+            await connection.execute(
+                """INSERT INTO redeem_rate_limits (user_id, last_attempt_at_ms)
+                   VALUES (?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET last_attempt_at_ms = excluded.last_attempt_at_ms""",
+                (user_id, attempt_at),
+            )
+            matches = configured_code is not None and hmac.compare_digest(
+                supplied_code.encode("utf-8"), configured_code.encode("utf-8")
+            )
+            if matches:
+                added_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                await connection.execute(
+                    """INSERT INTO uploaders (user_id, added_by, added_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                         added_by = excluded.added_by,
+                         added_at = excluded.added_at,
+                         revoked_at = NULL""",
+                    (user_id, user_id, added_at),
+                )
+                action = "redeem_success"
+                result = "success"
+            else:
+                action = "redeem_fail"
+                result = "invalid"
+            await connection.execute(
+                """INSERT INTO audit_log
+                   (actor_id, action, target_type, target_id, created_at_ms)
+                   VALUES (?, ?, 'user', ?, ?)""",
+                (user_id, action, str(user_id), attempt_at),
+            )
+            await connection.commit()
+        return result
 
 
 class RequiredChatRepository:
@@ -621,6 +815,8 @@ def _share_link_from_row(row: sqlite3.Row) -> ShareLink:
         created_at_ms=int(row["created_at_ms"]),
         expires_at_ms=None if row["expires_at_ms"] is None else int(row["expires_at_ms"]),
         revoked_at_ms=None if row["revoked_at_ms"] is None else int(row["revoked_at_ms"]),
+        use_count=int(row["use_count"]),
+        max_uses=None if row["max_uses"] is None else int(row["max_uses"]),
     )
 
 

@@ -58,7 +58,9 @@ def test_application_builds_without_network_access(settings: Settings) -> None:
         if isinstance(handler, CommandHandler)
         for command in handler.commands
     }
-    assert commands == {"start", "whoami", "configcheck"}
+    assert commands == {
+        "start", "whoami", "configcheck", "share", "redeem", "adduser", "revoke"
+    }
     assert application.bot_data["settings"] is settings
     assert application.bot_data["database"].path == settings.db_path
     assert application.bot_data["upload_handler"] is not None

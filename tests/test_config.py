@@ -60,13 +60,42 @@ def test_settings_parse_uploader_allowlist() -> None:
     assert settings.uploader_ids == (123456789, 456789123)
 
 
-def test_irrelevant_uploader_ids_are_ignored_outside_allowlist_mode() -> None:
+def test_settings_parse_optional_m3_redeem_and_required_channel() -> None:
     settings = Settings.from_env(
-        {**VALID_ENV, "UPLOADER_MODE": "all", "UPLOADER_IDS": "@ignored"}
+        {
+            **VALID_ENV,
+            "UPLOADER_REDEEM_CODE": "secure phrase",
+            "REQUIRED_CHANNEL_ID": "-1009876543210",
+            "VERIFIED_TRANSFER_MAX_FILE_BYTES": "2147483648",
+        }
     )
 
-    assert settings.uploader_mode == "all"
-    assert settings.uploader_ids == ()
+    assert settings.uploader_redeem_code == "secure phrase"
+    assert settings.required_channel_id == -1009876543210
+    assert settings.verified_transfer_max_file_bytes == 2_147_483_648
+
+
+def test_settings_leave_m3_options_disabled_when_unset() -> None:
+    settings = Settings.from_env(VALID_ENV)
+    assert settings.uploader_redeem_code is None
+    assert settings.required_channel_id is None
+    assert settings.verified_transfer_max_file_bytes is None
+
+
+def test_configured_uploader_ids_are_preserved_outside_allowlist_mode() -> None:
+    settings = Settings.from_env(
+        {**VALID_ENV, "UPLOADER_MODE": "admin", "UPLOADER_IDS": "456789123"}
+    )
+
+    assert settings.uploader_mode == "admin"
+    assert settings.uploader_ids == (456789123,)
+
+
+def test_invalid_configured_uploader_id_is_rejected_outside_allowlist_mode() -> None:
+    with pytest.raises(ConfigurationError, match="UPLOADER_IDS"):
+        Settings.from_env(
+            {**VALID_ENV, "UPLOADER_MODE": "admin", "UPLOADER_IDS": "@not_numeric"}
+        )
 
 
 @pytest.mark.parametrize(
@@ -95,6 +124,10 @@ def test_irrelevant_uploader_ids_are_ignored_outside_allowlist_mode() -> None:
         ("MAX_RELAY_FILE_BYTES", "9" * 5000),
         ("DEFAULT_PROTECT_CONTENT", "sometimes"),
         ("UPLOADER_MODE", "some-users"),
+        ("REQUIRED_CHANNEL_ID", "@not_numeric"),
+        ("REQUIRED_CHANNEL_ID", "0"),
+        ("UPLOADER_REDEEM_CODE", "bad\ncode"),
+        ("VERIFIED_TRANSFER_MAX_FILE_BYTES", "NaN"),
     ],
 )
 def test_settings_reject_invalid_values(key: str, value: str) -> None:

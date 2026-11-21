@@ -36,6 +36,9 @@ class Settings:
     default_protect_content: bool
     uploader_mode: str = "admin"
     uploader_ids: tuple[int, ...] = ()
+    uploader_redeem_code: str | None = None
+    required_channel_id: int | None = None
+    verified_transfer_max_file_bytes: int | None = None
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
@@ -62,10 +65,26 @@ class Settings:
         if uploader_mode not in {"admin", "allowlist", "all"}:
             errors.append("UPLOADER_MODE must be admin, allowlist, or all")
             uploader_mode = "admin"
+        raw_uploader_ids = source.get("UPLOADER_IDS", "")
         uploader_ids = (
-            _parse_uploader_ids(source.get("UPLOADER_IDS", ""), errors)
-            if uploader_mode == "allowlist"
+            _parse_uploader_ids(raw_uploader_ids, errors)
+            if uploader_mode == "allowlist" or raw_uploader_ids.strip()
             else ()
+        )
+
+        raw_redeem_code = source.get("UPLOADER_REDEEM_CODE", "").strip()
+        if len(raw_redeem_code) > 256 or any(ord(character) < 32 for character in raw_redeem_code):
+            errors.append("UPLOADER_REDEEM_CODE must be at most 256 printable characters")
+            uploader_redeem_code = None
+        else:
+            uploader_redeem_code = raw_redeem_code or None
+        required_channel_id = _parse_optional_channel_id(
+            source.get("REQUIRED_CHANNEL_ID", ""), errors
+        )
+        verified_transfer_max_file_bytes = _parse_optional_nonnegative_int(
+            source.get("VERIFIED_TRANSFER_MAX_FILE_BYTES", ""),
+            "VERIFIED_TRANSFER_MAX_FILE_BYTES",
+            errors,
         )
 
         raw_db_path = source.get("DB_PATH", "./data/bot.db").strip()
@@ -108,6 +127,9 @@ class Settings:
             default_protect_content=default_protect_content,
             uploader_mode=uploader_mode,
             uploader_ids=uploader_ids,
+            uploader_redeem_code=uploader_redeem_code,
+            required_channel_id=required_channel_id,
+            verified_transfer_max_file_bytes=verified_transfer_max_file_bytes,
         )
 
 
@@ -153,7 +175,6 @@ def _parse_uploader_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
     if not raw_value.strip():
         errors.append("UPLOADER_IDS must contain at least one numeric Telegram user ID when UPLOADER_MODE=allowlist")
         return ()
-
     parts = raw_value.split(",")
     parsed: list[int] = []
     invalid = False
@@ -195,6 +216,37 @@ def _parse_storage_channel_id(raw_value: str, errors: list[str]) -> int:
         errors.append("STORAGE_CHANNEL_ID must fit a non-zero signed 64-bit integer")
         return 0
     return channel_id
+
+
+def _parse_optional_channel_id(raw_value: str, errors: list[str]) -> int | None:
+    value = raw_value.strip()
+    if not value:
+        return None
+    digits = value.lstrip("+-")
+    if re.fullmatch(r"[+-]?[0-9]+", value) is None or len(digits) > 19:
+        errors.append("REQUIRED_CHANNEL_ID must be a non-zero integer Telegram chat ID")
+        return None
+    channel_id = int(value)
+    if channel_id == 0 or not (_MIN_SIGNED_64 <= channel_id <= _MAX_SIGNED_64):
+        errors.append("REQUIRED_CHANNEL_ID must be a non-zero signed 64-bit integer")
+        return None
+    return channel_id
+
+
+def _parse_optional_nonnegative_int(
+    raw_value: str, field: str, errors: list[str]
+) -> int | None:
+    value = raw_value.strip()
+    if not value:
+        return None
+    if not value.isascii() or not value.isdecimal() or len(value) > 19:
+        errors.append(f"{field} must be a non-negative integer")
+        return None
+    parsed = int(value)
+    if parsed > _MAX_SIGNED_64:
+        errors.append(f"{field} must fit a signed 64-bit integer")
+        return None
+    return parsed
 
 
 def _parse_positive_int(raw_value: str, field: str, errors: list[str]) -> int:

@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from media_bot import config
 from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
+from media_bot.db.repositories import UploaderRepository
 
 
 logger = logging.getLogger(__name__)
@@ -26,14 +27,19 @@ def is_admin(user_id: int) -> bool:
 
 
 def can_upload(user_id: int, settings: Settings) -> bool:
-    """Return whether the user is permitted by the configured uploader mode."""
+    """Return authorization from the static portion of the uploader allowlist."""
     if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
         return False
     if settings.uploader_mode == "all":
         return True
-    if settings.uploader_mode == "allowlist":
-        return user_id in settings.uploader_ids
-    return user_id in settings.admin_ids
+    return user_id in settings.admin_ids or user_id in settings.uploader_ids
+
+
+async def can_upload_with_registry(
+    user_id: int, settings: Settings, uploaders: UploaderRepository
+) -> bool:
+    """Apply the M3 effective allowlist, including active database grants."""
+    return can_upload(user_id, settings) or await uploaders.is_active(user_id)
 
 
 def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:

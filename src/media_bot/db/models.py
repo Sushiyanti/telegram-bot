@@ -49,6 +49,18 @@ class ShareLink:
     created_at_ms: int
     expires_at_ms: int | None
     revoked_at_ms: int | None
+    use_count: int = 0
+    max_uses: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UploaderGrant:
+    """Current uploader grant and the actor/timestamps that established it."""
+
+    user_id: int
+    added_by: int | None
+    added_at: str
+    revoked_at: str | None
 
 
 @dataclass(frozen=True, slots=True)

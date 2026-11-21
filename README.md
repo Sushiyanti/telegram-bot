@@ -1,6 +1,6 @@
 # Telegram Private Media Storage Bot
 
-A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds the first private-DM media-ingestion flow. Delivery, membership enforcement, and share-link UI remain Milestone 3 work and are not included here.
+A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery.
 
 ## Runtime and dependencies
 
@@ -19,11 +19,11 @@ uv sync --locked --group dev
 cp .env.example .env
 ```
 
-Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). `UPLOADER_MODE` defaults to `admin`; choose `allowlist` and set `UPLOADER_IDS` to comma-separated numeric IDs to admit an explicit list, or `all` to accept any private user. `UPLOADER_MODE=all` with `ENV=prod` emits a startup warning. `DEFAULT_PROTECT_CONTENT` is retained as a future recipient-copy preference; M2 does not pass it to storage copies.
+Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). The effective upload allowlist includes admins, active database uploader grants, and any supplied `UPLOADER_IDS`; `UPLOADER_MODE=all` remains the explicit open-upload override. Set optional `UPLOADER_REDEEM_CODE` to enable `/redeem <code>`, and optional `REQUIRED_CHANNEL_ID` to require channel membership before delivery. `VERIFIED_TRANSFER_MAX_FILE_BYTES` is an additional safety setting: leave it unset until recipient `copyMessage` support has been verified end to end; without it, share creation and delivery fail closed. `DEFAULT_PROTECT_CONTENT` applies to recipient-facing copies; storage copies continue to pass `protect_content=False`.
 
 The bot can be started with either `uv run --locked --group dev python -m app` or `uv run --locked --group dev python -m media_bot`. Both entry points validate settings and initialize the database before polling. Missing or malformed settings produce a readable error that lists each invalid key. The token is never read from a tracked file; if a token is disclosed, revoke it through BotFather and replace it.
 
-`/whoami` reports the caller's numeric user ID and configuration-based admin status. Admin-only `/configcheck` reports sanitized PASS/FAIL checks for `getMe`, storage-channel reachability and administrator status, channel privacy, admin-ID parsing/count, database version/writability, and the configured maximum relay size. Configcheck tests use mocked Telegram calls; no live PASS run has been made because a test bot and private channel have not been provisioned.
+`/whoami` reports the caller's numeric user ID and configuration-based admin status. Admin-only `/configcheck` reports sanitized PASS/FAIL checks for `getMe`, storage-channel reachability and administrator status, channel privacy, admin-ID parsing/count, database version/writability, and the configured maximum relay size. A live `/configcheck` PASS was verified previously; automated configcheck tests continue to mock Telegram calls.
 
 ## M2 private media intake
 
@@ -31,7 +31,13 @@ Permitted users can send a document, photo, video, audio file, voice message, an
 
 An accepted upload creates one item record, its storage-message references, and per-file metadata/fingerprint records. The item stores the aggregate byte count for an album; `sha256` remains `NULL`. A repeated `(uploader, file_unique_id)` is rejected before another copy. Confirmations include the item ID and size (and album message count), never a Telegram `file_id` or storage message ID. Rejections and storage-copy failures are written to `audit_log`; failures clear the M2 pending row. The M2 test suite mocks all Telegram methods. No live bot/channel integration has been run because a test bot, private storage channel, and authorized test user were not provisioned.
 
-`DEFAULT_PROTECT_CONTENT` continues to be stored on item metadata as the future recipient-copy preference. M2 explicitly passes `protect_content=False` for both storage-copy methods; the config value has no effect on storage copies. Decide and verify recipient-facing semantics before M3.
+`DEFAULT_PROTECT_CONTENT` is passed to recipient-facing delivery copies only. The M2 intake path explicitly passes `protect_content=False` for storage copies.
+
+## M3 uploader, sharing, and delivery
+
+`/redeem <code>` verifies the optional uploader code and grants a database-backed uploader record. Attempts are limited to one per 30 seconds per user; successes and failures are audited without recording the supplied code. `/adduser <user_id>` and `/revoke <user_id>` are admin-only. `/share <item_id>` is limited to admins and uploaders and returns a `t.me` deep link; only the SHA-256 token digest is stored. Links retain the previously accepted non-expiring default and support optional persisted use limits at the repository/service layer.
+
+Opening `/start <token>` checks token validity, expiry, revocation, remaining uses, item availability, and (when configured) `getChatMember` status before atomically consuming one use. Delivery loops through the ordered storage message references and calls Telegram `copyMessage`; albums are delivered as successive messages. Non-members are refused with a join instruction. Failed membership checks fail closed and do not consume a use. The bot does not download or re-upload media.
 
 ## Tests
 
@@ -39,15 +45,15 @@ An accepted upload creates one item record, its storage-message references, and 
 uv run --locked --group dev pytest
 ```
 
-Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and uploader allow/deny behavior, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, SQLite migrations and constraints, repository persistence, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. They make no live Telegram calls.
+Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke, share URLs, member/non-member and album delivery, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. All Telegram calls in tests are mocked.
 
 ## Persistence and share-link safety
 
-The versioned schema is in `src/media_bot/db/migrations/`. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Audit records have database triggers that reject update and delete operations.
+The current schema is version 4. Migration 0001 defines the persistent media, share-link, membership-target, and pending-upload data. Migration 0002 adds an append-only `audit_log`; denied admin commands record the actor ID, action, target type, and Python handler name. Migration 0003 adds nullable item SHA-256, per-file source metadata, a unique uploader/file-fingerprint map for dedupe, and a `pipeline` marker so M2 recovery does not consume legacy pending rows. Migration 0004 adds the identity parent table, uploader grants, durable redemption throttles, and share-link use counters/limits. Audit records have database triggers that reject update and delete operations.
 
 Items map to one or more private storage message references. Share links store only a SHA-256 digest of a cryptographically random bearer token, are non-expiring by default, and can be revoked. **The proposed seven-day TTL change was deferred by the user; no TTL default change has been applied.** File sizes are integer byte counts when Telegram provides them; an unknown size is stored as `NULL`. There is no hardcoded maximum file size in the schema.
 
-Share-link creation fails closed unless the item has storage message references, its size is known, and the selected transfer capability provides a verified end-to-end maximum at least as large as the item. No production transfer backend has been implemented or experimentally verified yet, so the current capability is unknown and this service does not enable real share-link creation.
+Share-link creation and delivery fail closed unless the item has storage message references, its size is known, and `VERIFIED_TRANSFER_MAX_FILE_BYTES` supplies a verified end-to-end maximum at least as large as the item. This explicit optional setting was added to preserve the accepted M1 transfer-capability contract rather than assuming `MAX_RELAY_FILE_BYTES` also proves recipient-copy support.
 
 ## Database backup and restore
 
@@ -90,6 +96,6 @@ Before enabling the service, add the bot to the private storage channel as an ad
 
 ## Current scope and next integration work
 
-The implemented flow stops after storing an upload and confirming its item ID. Delivery, membership checks, share-link UI, and recipient `copyMessage` integration remain out of scope for M2 and are reserved for M3.
+M3 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channel, and authorized test accounts.
 
 Large-file limits are being investigated separately. The complete future integration test must upload each fixture through a Premium or ordinary user account to the bot, copy it into the private channel, persist the message reference, copy it to a test recipient, and verify a full download/checksum. Documented limits and experimental results will be kept distinct; no size is supported merely because a client displays it.

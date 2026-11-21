@@ -12,12 +12,12 @@ from typing import Any, AsyncIterator
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from media_bot.auth import can_upload
+from media_bot.auth import can_upload_with_registry
 from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
 from media_bot.db.models import ItemFile, MediaItem, PendingUploadMessage
-from media_bot.db.repositories import ItemRepository, PendingUploadRepository
+from media_bot.db.repositories import ItemRepository, PendingUploadRepository, UploaderRepository
 from media_bot.media_transfer import StorageMessageRef
 from media_bot.services import PendingUploadService
 
@@ -96,6 +96,7 @@ class UploadHandler:
         self.settings = settings
         self.database = database
         self.items = ItemRepository(database)
+        self.uploaders = UploaderRepository(database)
         self.pending = PendingUploadService(PendingUploadRepository(database))
         self.audit = AuditLogRepository(database)
         self.debounce_seconds = debounce_seconds
@@ -121,7 +122,7 @@ class UploadHandler:
 
         user_id = int(user.id)
         bot = context.bot
-        if not can_upload(user_id, self.settings):
+        if not await can_upload_with_registry(user_id, self.settings, self.uploaders):
             await self._audit(
                 actor_id=user_id,
                 action="upload_denied",

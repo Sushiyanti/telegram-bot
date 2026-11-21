@@ -62,7 +62,7 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
         tables = await (await connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )).fetchall()
-    assert version[0] == 3
+    assert version[0] == 4
     assert journal[0].lower() == "wal"
     assert foreign_keys[0] == 1
     assert timeout[0] == 2300
@@ -74,6 +74,9 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
         "pending_uploads",
         "pending_upload_messages",
         "audit_log",
+        "users",
+        "uploaders",
+        "redeem_rate_limits",
     }
     assert db.path.stat().st_mode & 0o777 == 0o600
 
@@ -86,7 +89,7 @@ async def test_migration_repeatability_is_idempotent(database: Database) -> None
         indexes = await (await connection.execute(
             "SELECT name FROM sqlite_master WHERE type='index'"
         )).fetchall()
-    assert version[0] == 3
+    assert version[0] == 4
     assert len([row[0] for row in indexes if row[0] == "share_links_by_item_id"]) == 1
 
 
@@ -105,7 +108,7 @@ async def test_version_one_database_applies_audit_and_upload_migrations(tmp_path
         tables = await (await connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )).fetchall()
-    assert version[0] == 3
+    assert version[0] == 4
     assert {"audit_log", "item_files", "item_file_fingerprints"} <= {
         row[0] for row in tables
     }
@@ -128,7 +131,7 @@ async def test_version_two_database_applies_upload_migration(tmp_path: Path) -> 
     async with database.connection() as connection:
         version = await (await connection.execute("PRAGMA user_version")).fetchone()
         columns = await (await connection.execute("PRAGMA table_info(items)")).fetchall()
-    assert version[0] == 3
+    assert version[0] == 4
     assert "sha256" in {row["name"] for row in columns}
 
 
