@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from media_bot.auth import can_upload_with_registry, is_admin
@@ -33,6 +34,18 @@ def _database(context: ContextTypes.DEFAULT_TYPE) -> Database:
 def _private_chat(update: Update) -> bool:
     chat = update.effective_chat
     return chat is not None and getattr(chat, "type", None) == "private"
+
+
+def _is_missing_storage_message_error(error: BadRequest) -> bool:
+    text = str(error).lower()
+    return any(
+        marker in text
+        for marker in (
+            "message to copy not found",
+            "message_id_invalid",
+            "message identifier is not specified",
+        )
+    )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -82,7 +95,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         except Exception as exc:
             logger.warning("required_channel_check_failed (%s)", type(exc).__name__)
-            await message.reply_text("Membership could not be verified. Try again later.")
+            await message.reply_text(
+                "Membership could not be verified. Please contact the bot administrator."
+            )
             return
         status = str(getattr(membership, "status", "")).lower()
         member = status in {"creator", "administrator", "member"}
@@ -112,6 +127,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 message_id=reference.message_id,
                 protect_content=settings.default_protect_content,
             )
+    except BadRequest as exc:
+        if _is_missing_storage_message_error(exc):
+            logger.warning("share_item_unavailable (storage message missing)")
+            try:
+                await items.delete(item.id if item.id is not None else link.item_id)
+            except Exception as cleanup_exc:
+                logger.error("unavailable_item_cleanup_failed (%s)", type(cleanup_exc).__name__)
+            await message.reply_text("This file is no longer available")
+            return
+        logger.error("share_delivery_failed (%s)", type(exc).__name__)
+        await message.reply_text("Delivery failed. Please contact the bot administrator.")
+        return
     except Exception as exc:
         logger.error("share_delivery_failed (%s)", type(exc).__name__)
         await message.reply_text("Delivery failed. Please contact the bot administrator.")
@@ -235,6 +262,9 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     target_id = int(context.args[0])
     if target_id <= 0:
         await message.reply_text("User ID must be a positive numeric ID.")
+        return
+    if target_id in _settings(context).admin_ids:
+        await message.reply_text("Administrators cannot be revoked.")
         return
     changed = await UploaderRepository(_database(context)).revoke(
         user_id=target_id,

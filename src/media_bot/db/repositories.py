@@ -12,6 +12,7 @@ import aiosqlite
 from media_bot.db.database import Database
 from media_bot.db.models import (
     ItemFile,
+    ItemSummary,
     MediaItem,
     PendingUpload,
     PendingUploadMessage,
@@ -240,6 +241,71 @@ class ItemRepository:
             sha256=None if row["sha256"] is None else bytes(row["sha256"]),
             files=files,
         )
+
+    async def list_recent(self, limit: int = 10) -> tuple[ItemSummary, ...]:
+        """Return recent item metadata without storage or Telegram file IDs."""
+        _require_positive_int(limit, "limit")
+        if limit > 100:
+            raise InvalidRecord("limit must not exceed 100")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                """SELECT id, owner_user_id, media_type, file_size_bytes, created_at_ms
+                   FROM items ORDER BY created_at_ms DESC, id DESC LIMIT ?""",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return tuple(
+            ItemSummary(
+                id=int(row["id"]),
+                owner_user_id=int(row["owner_user_id"]),
+                media_type=str(row["media_type"]),
+                file_size_bytes=(
+                    None if row["file_size_bytes"] is None else int(row["file_size_bytes"])
+                ),
+                created_at_ms=int(row["created_at_ms"]),
+            )
+            for row in rows
+        )
+
+    async def delete(self, item_id: int) -> tuple[StorageMessageRef, ...] | None:
+        """Atomically remove an item and its restrictive dependents.
+
+        Returns the storage references for Telegram-side cleanup, or ``None``
+        when the item does not exist. Telegram calls are left to the command
+        handler after the database transaction commits.
+        """
+        _require_positive_int(item_id, "item_id")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT id FROM items WHERE id = ?", (item_id,)
+            )
+            if await cursor.fetchone() is None:
+                await connection.rollback()
+                return None
+            cursor = await connection.execute(
+                """SELECT storage_chat_id, storage_message_id, sequence
+                   FROM item_storage_messages WHERE item_id = ? ORDER BY sequence""",
+                (item_id,),
+            )
+            references = tuple(
+                StorageMessageRef(
+                    int(row["storage_chat_id"]),
+                    int(row["storage_message_id"]),
+                    int(row["sequence"]),
+                )
+                for row in await cursor.fetchall()
+            )
+            for table in (
+                "share_links",
+                "item_file_fingerprints",
+                "item_files",
+                "item_storage_messages",
+            ):
+                await connection.execute(f"DELETE FROM {table} WHERE item_id = ?", (item_id,))
+            await connection.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            await connection.commit()
+        return references
 
     async def find_item_id_by_file_unique_id(
         self, owner_user_id: int, file_unique_id: str

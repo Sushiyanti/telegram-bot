@@ -1,6 +1,6 @@
 # Telegram Private Media Storage Bot
 
-A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery.
+A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance.
 
 ## Runtime and dependencies
 
@@ -35,9 +35,13 @@ An accepted upload creates one item record, its storage-message references, and 
 
 ## M3 uploader, sharing, and delivery
 
-`/redeem <code>` verifies the optional uploader code and grants a database-backed uploader record. Attempts are limited to one per 30 seconds per user; successes and failures are audited without recording the supplied code. `/adduser <user_id>` and `/revoke <user_id>` are admin-only. `/share <item_id>` is limited to admins and uploaders; non-admin uploaders may share only items they own, while admins may share any item. The command returns a `t.me` deep link; only the SHA-256 token digest is stored. Links retain the previously accepted non-expiring default and support optional persisted use limits at the repository/service layer.
+`/redeem <code>` verifies the optional uploader code and grants a database-backed uploader record. Attempts are limited to one per 30 seconds per user; successes and failures are audited without recording the supplied code. `/adduser <user_id>` and `/revoke <user_id>` are admin-only; `/revoke` refuses targets in `ADMIN_IDS`. `/share <item_id>` is limited to admins and uploaders; non-admin uploaders may share only items they own, while admins may share any item. The command returns a `t.me` deep link; only the SHA-256 token digest is stored. Links retain the previously accepted non-expiring default and support optional persisted use limits at the repository/service layer.
 
-Opening `/start <token>` checks token validity, expiry, revocation, remaining uses, item availability, and (when configured) `getChatMember` status before atomically consuming one use. Delivery loops through the ordered storage message references and calls Telegram `copyMessage`; albums are delivered as successive messages. Non-members are refused with a join instruction. Failed membership checks fail closed and do not consume a use. The bot does not download or re-upload media.
+Opening `/start <token>` checks token validity, expiry, revocation, remaining uses, item availability, and (when configured) `getChatMember` status before atomically consuming one use. Delivery loops through the ordered storage message references and calls Telegram `copyMessage`; albums are delivered as successive messages. Non-members are refused with a join instruction. Failed membership checks fail closed and do not consume a use; if membership cannot be checked, the recipient is directed to contact the administrator. If Telegram reports that a source storage message is missing, the bot replies `This file is no longer available` and removes the item and its dependent metadata from the database. The bot does not download or re-upload media.
+
+## M4 admin management and resilience
+
+Admin-only `/list [limit]` shows up to 100 recent items (10 by default), with item ID, uploader ID, media type, byte size, and UTC creation date; Telegram file IDs are never included. Admin-only `/delete <item_id>` transactionally removes the item, storage references, share links, per-file metadata, and fingerprints, then best-effort deletes the associated storage-channel messages. Telegram deletion errors (including a message already removed manually) do not interrupt database cleanup. The schema remains version 4; see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for a headless VPS and scheduled-backup guide.
 
 ## Tests
 
@@ -45,7 +49,7 @@ Opening `/start <token>` checks token validity, expiry, revocation, remaining us
 uv run --locked --group dev pytest
 ```
 
-Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke, share URLs, member/non-member and album delivery, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. All Telegram calls in tests are mocked.
+Tests cover configuration validation and `.env` loading, missing-config startup, application construction without network access, admin and database-backed uploader authorization, `/whoami`, mocked configcheck pass/fail cases, single and album uploads, failure/rejection auditing, dedupe, `/redeem` success/failure/cooldown, admin grant/revoke/list/delete, share URLs, member/non-member and album delivery, missing-channel and missing-storage behavior, expiry and use limits, SQLite migrations and constraints, secure token generation/hash/lookup/revocation, non-expiring-by-default links, pending-upload recovery, and backup/restore. All Telegram calls in tests are mocked.
 
 ## Persistence and share-link safety
 
@@ -82,7 +86,7 @@ Restoring metadata does not restore Telegram media if the private channel or its
 
 ## Simple VPS deployment
 
-The service template is `deploy/telegram-storage-bot.service`. It uses one systemd process, outbound long polling, a dedicated service account, and `/var/lib/telegram-storage-bot` for persistent state. It exposes no inbound HTTP port. It intentionally does not start or deploy anything automatically.
+The service template is `deploy/telegram-storage-bot.service`. It uses one systemd process, outbound long polling, a dedicated service account, and `/var/lib/telegram-storage-bot` for persistent state. It exposes no inbound HTTP port. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for complete headless installation and backup scheduling instructions; this guide does not deploy or start anything automatically.
 
 A typical manual deployment is:
 
@@ -96,6 +100,6 @@ Before enabling the service, add the bot to the private storage channel as an ad
 
 ## Current scope and next integration work
 
-M3 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channel, and authorized test accounts.
+M4 implementation is complete. No later milestone work is included here; live Telegram integration tests are separate from the mocked automated suite and require a provisioned bot, storage channel, and authorized test accounts.
 
 Large-file limits are being investigated separately. The complete future integration test must upload each fixture through a Premium or ordinary user account to the bot, copy it into the private channel, persist the message reference, copy it to a test recipient, and verify a full download/checksum. Documented limits and experimental results will be kept distinct; no size is supported merely because a client displays it.

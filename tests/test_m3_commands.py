@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from telegram.error import BadRequest
 
 from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
@@ -453,7 +454,7 @@ async def test_start_fails_closed_when_membership_check_errors(database: Databas
     token = await create_link(database, item_id)
     bot = SimpleNamespace(
         copy_message=AsyncMock(),
-        get_chat_member=AsyncMock(side_effect=RuntimeError("private details")),
+        get_chat_member=AsyncMock(side_effect=BadRequest("Not enough rights to get members")),
     )
     update = make_update()
     context = make_context(
@@ -461,7 +462,9 @@ async def test_start_fails_closed_when_membership_check_errors(database: Databas
     )
     await start_command(update, context)
     bot.copy_message.assert_not_awaited()
-    assert "Membership could not be verified" in update.effective_message.reply_text.await_args.args[0]
+    assert update.effective_message.reply_text.await_args.args[0] == (
+        "Membership could not be verified. Please contact the bot administrator."
+    )
     link = (await ShareLinkRepository(database).list_for_item(item_id))[0]
     assert link.use_count == 0
 

@@ -10,6 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
+from media_bot.handlers.admin import delete_command, list_command
 from media_bot.handlers.diagnostics import configcheck_command, whoami_command
 from media_bot.handlers.sharing import (
     adduser_command,
@@ -62,6 +63,12 @@ def build_application(settings: Settings) -> Application:
     )
     application.add_handler(
         CommandHandler("revoke", admin_only(revoke_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("list", admin_only(list_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("delete", admin_only(delete_command), filters=private_commands)
     )
     application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("configcheck", configcheck_command))

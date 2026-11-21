@@ -39,6 +39,17 @@ class MediaItem:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemSummary:
+    """Non-sensitive fields used by the admin recent-items command."""
+
+    id: int
+    owner_user_id: int
+    media_type: str
+    file_size_bytes: int | None
+    created_at_ms: int
+
+
+@dataclass(frozen=True, slots=True)
 class ShareLink:
     """Persisted share-link metadata. It never contains the bearer token."""
 
