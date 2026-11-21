@@ -143,6 +143,15 @@ async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Usage: /share <item_id>")
         return
     item_id = int(context.args[0])
+    admin = is_admin(int(user.id))
+    items = ItemRepository(database)
+    item = await items.get(item_id)
+    if item is None:
+        await message.reply_text("Could not create a share link for that item.")
+        return
+    if not admin and item.owner_user_id != int(user.id):
+        await message.reply_text("You can only share your own files.")
+        return
     try:
         me = await context.bot.get_me()
     except Exception as exc:
@@ -154,7 +163,6 @@ async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Share links are temporarily unavailable.")
         return
 
-    items = ItemRepository(database)
     links = ShareLinkService(
         ShareLinkRepository(database),
         items,

@@ -94,9 +94,14 @@ def make_context(
     )
 
 
-async def add_item(database: Database, *, references: tuple[StorageMessageRef, ...] | None = None) -> int:
+async def add_item(
+    database: Database,
+    *,
+    references: tuple[StorageMessageRef, ...] | None = None,
+    owner_user_id: int = ADMIN_ID,
+) -> int:
     item = MediaItem(
-        owner_user_id=ADMIN_ID,
+        owner_user_id=owner_user_id,
         media_type="album" if references and len(references) > 1 else "document",
         file_size_bytes=123,
         storage_messages=references or (StorageMessageRef(-1007123456789, 202, 0),),
@@ -319,11 +324,42 @@ async def test_share_creation_fails_closed_without_verified_transfer_limit(
 
 
 async def test_share_allows_active_uploader(database: Database) -> None:
-    item_id = await add_item(database)
+    item_id = await add_item(database, owner_user_id=USER_ID)
     await UploaderRepository(database).add(user_id=USER_ID, added_by=ADMIN_ID)
     update = make_update(user_id=USER_ID)
     await share_command(update, make_context(database, [str(item_id)]))
     assert "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+
+
+async def test_uploader_cannot_share_another_uploaders_item(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    uploader_a = USER_ID
+    uploader_b = USER_ID + 1
+    item_id = await add_item(database, owner_user_id=uploader_a)
+    await UploaderRepository(database).add(user_id=uploader_a, added_by=ADMIN_ID)
+    await UploaderRepository(database).add(user_id=uploader_b, added_by=ADMIN_ID)
+
+    update = make_update(user_id=uploader_b)
+    context = make_context(database, [str(item_id)])
+    await share_command(update, context)
+
+    update.effective_message.reply_text.assert_awaited_once_with(
+        "You can only share your own files."
+    )
+    context.bot.get_me.assert_not_awaited()
+    assert await ShareLinkRepository(database).list_for_item(item_id) == ()
+
+
+async def test_admin_can_share_another_uploaders_item(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    item_id = await add_item(database, owner_user_id=USER_ID)
+    update = make_update(user_id=ADMIN_ID)
+    context = make_context(database, [str(item_id)])
+
+    await share_command(update, context)
+
+    assert "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+    assert len(await ShareLinkRepository(database).list_for_item(item_id)) == 1
 
 
 async def test_start_with_no_token_sends_welcome(database: Database) -> None:
