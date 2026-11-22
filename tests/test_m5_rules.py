@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from telegram import InlineKeyboardMarkup
 from telegram.ext import ApplicationHandlerStop
 
 from media_bot.config import Settings, configure_admin_ids
+from media_bot.db.admins import AdminRepository
 from media_bot.db.database import Database
 from media_bot.db.models import MediaItem, StorageMessageRef
 from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
@@ -314,6 +316,23 @@ async def test_requirement_validation_rejects_real_start_bot(database: Database)
     assert accepted.settings["is_fake"] is True
 
 
+@pytest.mark.parametrize(
+    "link_url",
+    ["http://t.me/channel", "https://example.com/channel", "https://t.me/", "https://user@t.me/channel"],
+)
+async def test_requirement_rejects_unsafe_prompt_links(database: Database, link_url: str) -> None:
+    default = await CategoryRepository(database).default()
+    with pytest.raises(ValueError, match="link_url"):
+        await RequirementRepository(database).create(
+            category_id=default.id,
+            requirement_type="JOIN_CHAT",
+            target=REACT_CHANNEL,
+            is_fake=True,
+            wait_seconds=0,
+            link_url=link_url,
+        )
+
+
 async def test_react_requirement_uses_documented_defaults(database: Database) -> None:
     default = await CategoryRepository(database).default()
     req = await RequirementRepository(database).create(
@@ -394,7 +413,7 @@ async def test_start_fake_timed_rule_waits_then_delivers_without_consuming_early
         await start_command(update, context)
 
     sleep.assert_awaited_once_with(7)
-    assert [call.args[0] for call in message.reply_text.await_args_list][0] == "Verifying..."
+    assert [call.args[0] for call in message.reply_text.await_args_list][0] == "Please wait..."
     bot.copy_message.assert_awaited_once()
     link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
     assert link.use_count == 1
@@ -408,6 +427,7 @@ async def test_real_join_left_refuses_delivery_without_consuming_share_link(data
         target=REACT_CHANNEL,
         is_fake=False,
         wait_seconds=0,
+        link_url="https://t.me/+RequiredInvite123",
     )
     token = await share_token(database, item.id)
     update, message = start_update(token)
@@ -421,6 +441,8 @@ async def test_real_join_left_refuses_delivery_without_consuming_share_link(data
     link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
     assert link.use_count == 0
     assert "Join" in message.reply_text.await_args.args[0]
+    markup = message.reply_text.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].url == "https://t.me/+RequiredInvite123"
 
 
 async def test_start_fake_join_waits_five_seconds_then_delivers(database: Database) -> None:
@@ -431,6 +453,7 @@ async def test_start_fake_join_waits_five_seconds_then_delivers(database: Databa
         target=REACT_CHANNEL,
         is_fake=True,
         wait_seconds=5,
+        link_url="https://t.me/requiredchannel",
     )
     token = await share_token(database, item.id)
     update, message = start_update(token)
@@ -442,7 +465,37 @@ async def test_start_fake_join_waits_five_seconds_then_delivers(database: Databa
     sleep.assert_awaited_once_with(5)
     bot.get_chat_member.assert_not_awaited()
     bot.copy_message.assert_awaited_once()
-    assert "Verifying..." in [call.args[0] for call in message.reply_text.await_args_list]
+    assert any("Please wait..." in call.args[0] for call in message.reply_text.await_args_list)
+    prompt = message.reply_text.await_args_list[0]
+    assert "Please join the required channel or group" in prompt.args[0]
+    assert prompt.kwargs["reply_markup"].inline_keyboard[0][0].url == "https://t.me/requiredchannel"
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == 1
+
+
+async def test_start_fake_join_zero_wait_prompts_then_delivers_immediately(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type="JOIN_CHAT",
+        target=REACT_CHANNEL,
+        is_fake=True,
+        wait_seconds=0,
+        link_url="https://t.me/requiredchannel",
+    )
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    context, bot = start_context(database, token)
+
+    with patch("media_bot.services.rule_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        await start_command(update, context)
+
+    sleep.assert_not_awaited()
+    bot.get_chat_member.assert_not_awaited()
+    bot.copy_message.assert_awaited_once()
+    prompt = message.reply_text.await_args_list[0]
+    assert "Please join the required channel or group" in prompt.args[0]
+    assert prompt.kwargs["reply_markup"].inline_keyboard[0][0].url == "https://t.me/requiredchannel"
     link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
     assert link.use_count == 1
 
@@ -513,6 +566,7 @@ async def test_start_real_react_without_database_reaction_refuses_delivery(datab
         wait_seconds=0,
         last_x_messages=5,
         last_x_days=0,
+        link_url="https://t.me/requiredchannel",
     )
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     await ReactionRepository(database).observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
@@ -527,6 +581,9 @@ async def test_start_real_react_without_database_reaction_refuses_delivery(datab
     link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
     assert link.use_count == 0
     assert "React to at least one recent post" in message.reply_text.await_args.args[0]
+    assert message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url == (
+        "https://t.me/requiredchannel"
+    )
 
 
 @pytest.mark.parametrize("has_reaction", [False, True])
@@ -743,6 +800,33 @@ async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) 
     )
     await enforce_user_command_policy(uploader_update, context)
     uploader_update.effective_message.reply_text.assert_not_awaited()
+
+
+async def test_database_admin_bypasses_command_and_media_lockdown(database: Database) -> None:
+    configure_admin_ids(())
+    database_admin_id = 601003
+    assert await AdminRepository(database).add(
+        user_id=database_admin_id, added_by=ADMIN_ID
+    )
+    await BotSettingsRepository(database).set_user_commands_enabled(False)
+    context = SimpleNamespace(application=SimpleNamespace(bot_data={
+        "database": database,
+        "settings": replace(settings(database), admin_ids=()),
+    }))
+    command = SimpleNamespace(
+        effective_user=SimpleNamespace(id=database_admin_id),
+        effective_message=SimpleNamespace(text="/share 12", reply_text=AsyncMock()),
+    )
+    media = SimpleNamespace(
+        effective_user=SimpleNamespace(id=database_admin_id),
+        effective_message=SimpleNamespace(document=object(), reply_text=AsyncMock()),
+    )
+
+    await enforce_user_command_policy(command, context)
+    await enforce_user_command_policy(media, context)
+
+    command.effective_message.reply_text.assert_not_awaited()
+    media.effective_message.reply_text.assert_not_awaited()
 
 
 @pytest.mark.parametrize("choice,expected_count", [("a", 0), ("b", 1)])

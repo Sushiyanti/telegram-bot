@@ -5,7 +5,11 @@ import asyncio
 import logging
 from typing import Any
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from media_bot.db.rules import CategoryRepository, ReactionRepository, Requirement
+from media_bot.db.repositories import InvalidRecord
+from media_bot.db.rules import validate_telegram_link
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,11 @@ class RequirementEvaluator:
     async def _verify_one(self, requirement: Requirement, *, user_id: int, bot: Any, message: Any) -> bool:
         settings = requirement.settings
         wait_seconds = int(settings.get("wait_seconds", 0))
-        if requirement.type == "TIMED_WAIT" or bool(settings.get("is_fake", False)):
+        if requirement.type == "TIMED_WAIT":
             await _wait_with_message(message, wait_seconds)
+            return True
+        if bool(settings.get("is_fake", False)):
+            await _prompt_then_wait(message, requirement, wait_seconds)
             return True
 
         if requirement.type == "START_BOT":
@@ -63,7 +70,10 @@ class RequirementEvaluator:
                     channel_label = f"@{username.lstrip('@')}"
             except Exception as exc:
                 logger.debug("join_chat_label_lookup_failed (%s)", type(exc).__name__)
-            await message.reply_text(f"Join {channel_label} to access this file.")
+            await message.reply_text(
+                f"Join {channel_label} to access this file.",
+                reply_markup=_link_markup(requirement, "Open required channel or group"),
+            )
             return False
 
         if requirement.type == "REACT":
@@ -90,7 +100,10 @@ class RequirementEvaluator:
             )
             if has_reaction:
                 return True
-            await message.reply_text("React to at least one recent post in the required channel to access this file.")
+            await message.reply_text(
+                "React to at least one recent post in the required channel to access this file.",
+                reply_markup=_link_markup(requirement, "Open required channel"),
+            )
             return False
 
         logger.error("unknown_requirement_type")
@@ -99,6 +112,46 @@ class RequirementEvaluator:
 
 
 async def _wait_with_message(message: Any, wait_seconds: int) -> None:
-    await message.reply_text("Verifying...")
+    await message.reply_text("Please wait...")
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
+
+
+async def _prompt_then_wait(
+    message: Any, requirement: Requirement, wait_seconds: int
+) -> None:
+    prompts = {
+        "JOIN_CHAT": "Please join the required channel or group to continue.",
+        "REACT": "Please react to a post in the required channel to continue.",
+        "START_BOT": "Please open the required bot to continue.",
+    }
+    text = prompts.get(requirement.type, "Please continue to access this file.")
+    if wait_seconds > 0:
+        text += "\nPlease wait..."
+    await message.reply_text(
+        text,
+        reply_markup=_link_markup(requirement, _link_button_label(requirement.type)),
+    )
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+
+
+def _link_button_label(requirement_type: str) -> str:
+    return {
+        "JOIN_CHAT": "Open required channel or group",
+        "REACT": "Open required channel",
+        "START_BOT": "Open required bot",
+    }.get(requirement_type, "Open Telegram link")
+
+
+def _link_markup(
+    requirement: Requirement, label: str
+) -> InlineKeyboardMarkup | None:
+    try:
+        link_url = validate_telegram_link(requirement.settings.get("link_url"))
+    except InvalidRecord:
+        logger.warning("invalid_requirement_prompt_link (requirement_id=%s)", requirement.id)
+        return None
+    if link_url is None:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, url=link_url)]])

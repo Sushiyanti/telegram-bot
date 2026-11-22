@@ -4,7 +4,7 @@ Entries are ordered by milestone and record the choices that constrain implement
 
 ## M1 carry-forward
 
-- **Share-link expiry:** retain the non-expiring default. The proposed seven-day default remains deferred; links may still be explicitly expired or revoked through the existing model.
+- **Share-link expiry (USER #13):** keep links non-expiring by default while preserving optional per-link expiry. The data model/service support expiry, but `/share` currently exposes only the unlimited default; do not change that default. This UI gap is separate from M6.
 - **Audit history:** denied admin commands are persisted in the append-only audit log introduced by migration 0002.
 
 ## M2 — private-DM upload intake (2026-11-20)

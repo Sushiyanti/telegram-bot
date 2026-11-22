@@ -1,83 +1,68 @@
 # Telegram File-Sharing Bot — M6 Completion Handoff
 
-**Purpose:** Resume M6 completion safely from this checkpoint. This is not a declaration that the entire bot or every M6 expectation is complete. Use the user-authored requests in the DeepSeek export as the specification; assistant-generated summaries and milestone completion claims are not requirements or proof.
+**Purpose:** Continue the M6 completion review from the pushed checkpoint below. This document is not a declaration that M6 or the entire bot is complete. Use the original user-authored requests as the specification; do not begin M7.
 
 ## Repository checkpoint
 
 - Workspace: `/tmp/telegram-bot-review`
 - Branch: `main`
-- Starting commit for this pass: `4355fa4` — `Complete M6 rule wizard and edge-case coverage`
-- Schema version: 6; do not start M7.
-- No live Telegram actions were performed. This sandbox has no provisioned bot credentials or test channel/user environment.
-- This pass added no dependencies.
-- This checkpoint is based on `4355fa4`. The handoff does not assume whether a later save or push has occurred; use `git status`, `git log`, and upstream state as authoritative before continuing.
+- Pushed base for this continuation: `84eb314` (`Checkpoint M6 completion review`). This handoff describes the subsequent M6 changes in this continuation; consult `git log` and `git status` for the latest saved/pushed state.
+- Database schema remains version 6. No migration or dependency was added.
+- No live Telegram action was performed. This environment has no provisioned bot credentials or designated test channels/users.
 
-## Authoritative user-authored product requests
+## Authoritative user-authored requests
 
-The source is `/home/ubuntu/upload/deepseek_data-2026-11-21.zip`, specifically the USER-role turns in `chat_sessions/41f33959-4b1a-4d1b-b758-256eaed67ce9.json`. Relevant original user turns include:
+The primary source is `/home/ubuntu/upload/deepseek_data-2026-11-21.zip`, especially USER turns #69, #71, #73, #79, #85, #89, #91, and #93. The supplemental wizard requirements are in `/home/ubuntu/upload/pasted_content.txt`; the category-deletion request is in `/home/ubuntu/upload/pasted_content_2.txt`.
 
-- **Message #69 (2026-11-21 11:02Z):** The bot's main purpose is for admins and allowlisted staff to add/manage required channels, groups, and other actions before delivery through a generated file link. Admins should be able to enable/disable commands other than `/start` for regular users. Multiple storage channels/categories are needed.
-- **Message #71 (2026-11-21 11:31Z):** Requirements can be category-specific and dynamically inherited through linked categories; admins should manage complex settings in an understandable low-clutter UI that edits a single message. For bot-start and reaction checks, the user proposed multiple configurable passing approaches, including real checks, waits, and link/prompt approaches. The REACT message-count bound and day bound must be configurable, and the “last X messages” bound must be disableable while a reaction can still be required.
-- **Message #73 (2026-11-21 11:42Z):** Category deletion needs confirmation and a choice about removing or preserving requirement references that become orphaned. A large M5 implementation prompt is quoted in that turn; treat the quoted assistant prompt as context, not user-authored specification.
-- **Message #85 (2026-11-21 12:36Z):** The command lock should affect regular users, not allowlisted staff; the user explicitly said a broader Django-like permissions manager was not necessary at that time.
-- **Message #89 and #93:** The user objected to calling the panel finished when its UI/rule-testing work was incomplete and clarified that the work remained M6, not a new M7.
-- **Current-session direct concerns:** `/admin` should create a new panel when explicitly resent; Settings felt incomplete; Add Category was missing; the user asked for a thoughtful completion/reassessment, not a superficial button patch.
-- **Current-session checkpoint instruction:** If work remains, leave a controlled, resumable state and a file that lets another agent continue with the same mindset and source grounding.
+- **USER #69:** The bot is for sharing requested files through generated links while promoting required channels/groups/actions. Regular users may be restricted to `/start`; admins and allowlisted staff should bypass that lock. Multiple storage categories are needed.
+- **USER #71:** Requirements may be scoped/inherited by category. The panel should be understandable, low-clutter, and single-message. Passing methods should be configurable, including real checks, waits, and prompt/link-style flows for channels/groups and bot-start/reaction requirements. REACT message and day bounds must be configurable and independently disableable. The user also stated that Fake-style behavior should not be exposed as such to recipients.
+- **USER #73:** Category deletion needs confirmation and a choice to keep or delete orphaned requirements.
+- **USER #79:** Non-real/“cheating” passing approaches should remain configurable.
+- **USER #85:** Allowlisted users are staff and bypass the regular-user lock; a broad Django-like permissions manager was not necessary then.
+- **USER #89/#91/#93:** The implementation was not to be called complete just because the milestone had previously been accepted; the unfinished work belongs to M6, not a new M7.
+- **USER #13:** Keep share links non-expiring by default while allowing optional per-link expiry. The data model/service support optional expiry, but `/share` currently exposes only the non-expiring default. Keep that UI gap outside M6 unless the user expands scope; do not change the default.
 
-The export's user-authored turns do **not** enumerate additional Settings toggles beyond the regular-user command/upload lock. Do not silently invent a permission matrix; the user previously deferred it. If broader Settings controls are expected, clarify them with the user or locate an exact user-authored request.
+The export does not define a broader Settings/permissions matrix. Do not invent one. If additional controls are expected beyond the documented command/upload lock, ask for specifics. There is also a tension between #69's mention of allowlisted staff managing requirements and the admin-only panel request; do not expand uploader privileges without clarification.
 
-## Changes made in this checkpoint
+## Work completed in this continuation
 
-1. **Panel lifecycle:** Every explicit `/admin` or `/panel` command now creates a fresh panel message and retires the previous one. Navigation clicks still edit the active panel in place. Replaced-message callbacks are rejected. If an edit fails, the bot sends a clearly labelled fresh panel and invalidates the old message instead of silently leaving it unusable.
-2. **Add Category:** The Categories list now has an Add Category action. The panel collects a name, then a numeric storage chat ID or forwarded channel/chat message; it validates duplicate/reserved names, persists the category, audits the action, and returns to the category list in the panel. It warns that the bot needs administrator/post permission, but does not call Telegram to verify permissions.
-3. **Pending-state timeout:** The five-minute timeout is now checked on private commands as well as callbacks and private non-command input. An expired flow is cleared and the panel returns home without consuming the unrelated command.
-4. **Settings clarity and command policy:** Settings now explains who the regular-user lock affects. When locked, regular users are limited to `/start`; `/redeem` is locked too. Environment/database admins and active uploaders remain exempt. This follows the user’s “commands other than start” and staff-bypass requests.
-5. **Rule semantics:** `TIMED_WAIT` no longer presents a fake Real/Fake choice; it is explicitly wait-only. A REACT message bound of zero now means “any observed post,” but still requires a reaction. The optional day cutoff remains active, and zero days means no age cutoff. The wizard and confirmation text describe this accurately.
-6. **Category deletion disclosure:** Confirmation now explains that items move to Default, links to the deleted category are removed while other category records remain, and orphaned requirements can be kept or deleted.
-7. **Docs/tests:** M5/M6 guides were corrected, and regression coverage was added for category creation/navigation/deletion, fresh/reopened panels, stale callbacks, edit-failure recovery, timeout-on-command, Settings behavior, lock bypass, and REACT/TIMED_WAIT semantics.
+1. Added an end-to-end panel test for **Add Uploader**: selecting the uploader role, submitting a numeric ID, persisting the active grant, refreshing the uploader list in the same panel message, and ensuring no additional bot message is sent.
+2. Added a lockdown regression test for a **database-backed, non-environment admin**, exercising both command and media bypass while the regular-user lock is on.
+3. Implemented the user-requested optional **prompt/link path** using the existing `requirements.settings_json` field; no schema change. Public channel/group/user usernames from forwarded messages can prefill a Telegram URL. For private targets, an admin can paste an optional invite URL. Only HTTPS links on `t.me` or `telegram.me` are accepted.
+4. Fake JOIN_CHAT, REACT, and START_BOT rules now show a generic recipient-facing prompt and optional URL button, then pass immediately or after the configured wait. Real JOIN/REACT denials also show the configured link button when available. Link clicks are not monitored or treated as proof of membership, bot-start, or reaction. Recipient-facing wait text is neutral (“Please wait...”); it does not claim a check is happening. The admin wizard describes the Real versus prompt/wait behavior explicitly.
+5. Forwarded `MessageOriginChat` group targets are now accepted for channel/group rules as well as forwarded channels; public usernames can prefill the link.
+6. Matched the button choices to the supplemental specification: waits `0, 3, 5, 10, 30, 60`; REACT post bounds `0, 3, 5, 10`; age bounds `0, 7, 30`. Zero bounds disable those respective limits, not the reaction requirement.
+7. Corrected the handoff and decision log to cite USER #13 accurately, and updated the M5/M6 guides with link/prompt semantics and wait behavior.
 
-## Validation already run
+## Validation completed
 
-- Focused tests: `uv run --locked --group dev pytest -q tests/test_m6_panel.py tests/test_m5_rules.py` — **77 passed**.
-- Full suite: `uv run --locked --group dev pytest -q` — **217 passed**.
+- `uv run --locked --group dev pytest -q` — **229 passed**.
 - `uv run --locked python -m compileall -q src tests` — passed.
 - `git diff --check` — passed.
-- Re-run all checks after any further edits. Confirm `PRAGMA user_version == 6` if database/migration files are touched.
+- Direct SQLite check — `PRAGMA user_version=6`.
+- Ruff is not configured in `pyproject.toml`; no Ruff check was run.
+- Automated Telegram calls are mocked. **No live Telegram testing** was performed.
 
-## Preserved decisions and scope boundaries
+## Preserved behavior and scope boundaries
 
-- M6 is still the scope. Do not begin M7.
-- The panel rule wizard requires no typed rule syntax. Numeric IDs/forwarded messages and category names are input, as intended. The legacy M5 `/addrequirement` command still accepts typed rule syntax for compatibility; it is not the M6 panel wizard.
-- Real `START_BOT` verification remains unsupported without an attestation/integration bridge. The UI offers wait-only/fake behavior and does not claim to prove another bot was started.
-- Existing M5 behavior for a real JOIN_CHAT Telegram API error is retained: it falls back to the configured wait and passes. Existing M5 docs/tests encode this, and the user's history explicitly allows “cheating”/wait approaches. Do not change this policy silently; if tightening it, ask the user and update the user-facing configuration semantics.
-- Real REACT is limited to observed posts/reaction updates while the bot has the required admin/update access; there is no historical backfill. The existing documented fallback to wait when bot admin/API access is unavailable remains.
-- Category creation does not verify that the bot can post in the selected storage channel. The panel warns the admin; M5 documentation already states the operator must grant permissions.
-- UI navigation and Add flows remain inside the current panel message. An explicit `/admin` command intentionally opens a fresh message; an edit failure is the exceptional case where a replacement message is sent.
-
-## Remaining work / questions for the next agent
-
-### M6 completion checkpoint
-
-1. Inspect `git status`, rerun the validation commands above, and verify the handoff accurately matches the working tree.
-2. Decide with the user whether the one-tap category/storage flow should perform a live bot-permission check (or keep the current warning-only behavior).
-3. The user says Settings is incomplete, but the export only explicitly specifies the command/upload lock and explicitly defers broader permissions. Do not fabricate more settings. Ask what additional controls they expect if the current explanation/toggle is insufficient.
-4. If the user expects all M6 flows to be live-tested, request/provision a safe Telegram test environment; no live verification has been done in this pass.
-
-### Product gaps visible from the original purpose (do not silently expand M6)
-
-- **Staff management scope is ambiguous:** Message #69 describes admins and allowlisted staff as managing required channels/groups, while the M6 panel request and current implementation make `/admin` admin-only. Clarify whether uploaders should have any category/requirement read or management access; do not grant broader staff authority solely from this ambiguity.
-- For private required channels/groups, the current schema/UI stores the numeric target but does not store or show a user-facing invite URL. Real JOIN denial can show a public `@username`; private targets may only produce a generic “required chat” prompt. The user’s bot purpose is advertising/join conversion, so ask whether each JOIN rule needs a separate invite URL and how it should be validated/displayed.
-- The export describes alternate wait/link/prompt passing approaches, but the current Fake JOIN_CHAT behavior is wait-only and does not display a target link or prompt. Clarify whether the desired Fake mode should include an optional URL/button, be configurable per requirement, or remain wait-only.
-- The user-authored source reviewed here did not establish a share-link expiry control. Do not rely on assistant-authored summaries as authorization to add one; locate an original user request or ask.
-- Album DB persistence is all-or-nothing, but already-copied Telegram storage messages cannot be rolled back if a later copy/DB step fails; investigate cleanup/compensation behavior if continuing broader product-hardening work.
+- M6 remains the scope; do not start M7.
+- Admin-panel navigation and input responses edit the same active panel message. An explicit `/admin` or `/panel` command intentionally opens a new panel; exceptional edit failure may send a replacement panel.
+- Rule syntax is not typed in the panel. Numeric IDs/forwarded messages, category names, and the optional Telegram URL are the accepted inputs.
+- Real `START_BOT` verification remains unsupported without a separate attestation bridge; only prompt/wait behavior is offered.
+- Real JOIN_CHAT and REACT API/admin failures retain the existing configured-wait fallback. A real JOIN denial does not consume the share-link use.
+- Real REACT can only use posts/reaction updates observed by the running bot; there is no historical backfill.
+- Category creation warns that the bot needs posting rights but does not verify them live.
+- Optional share-link expiry UI remains outside this continuation. `/share` keeps the existing unlimited/non-expiring default.
 
 ## Key files
 
-- `src/media_bot/handlers/panel.py` — panel lifecycle, category creation, staff/settings, rule wizard, callbacks and timeouts.
-- `src/media_bot/application.py` — command-time timeout middleware and Telegram handler order.
-- `src/media_bot/handlers/policy.py` — regular-user lock with staff bypass.
-- `src/media_bot/db/rules.py` — category/settings/reaction repositories and REACT window semantics.
-- `src/media_bot/services/rule_engine.py` — JOIN_CHAT/TIMED_WAIT/START_BOT/REACT runtime checks.
-- `tests/test_m6_panel.py`, `tests/test_m5_rules.py` — focused regression and `/start <token>` coverage.
-- `docs/M6_ADMIN_PANEL.md`, `docs/M5_CATEGORIES_AND_REQUIREMENTS.md` — user/operator-facing behavior.
-- Original export: `/home/ubuntu/upload/deepseek_data-2026-11-21.zip`; supplemental user text: `/home/ubuntu/upload/pasted_content.txt` and `/home/ubuntu/upload/pasted_content_2.txt`.
+- `src/media_bot/handlers/panel.py` — single-message panel, rule wizard, input validation, staff flows, and timeouts.
+- `src/media_bot/db/rules.py` — requirements/settings persistence and Telegram URL validation.
+- `src/media_bot/services/rule_engine.py` — real checks, neutral wait messaging, prompt/link buttons, and Fake wait/prompt behavior.
+- `src/media_bot/handlers/policy.py` — regular-user lockdown with admin/uploader bypass.
+- `tests/test_m6_panel.py`, `tests/test_m5_rules.py` — panel and mocked `/start <token>` acceptance coverage.
+- `docs/M6_ADMIN_PANEL.md`, `docs/M5_CATEGORIES_AND_REQUIREMENTS.md`, `docs/decision-log.md` — behavior and decision documentation.
+
+## Status / next step
+
+The listed automated checks pass, and the continuation closes the two identified test gaps and the prompt/link product-flow gap. **Do not declare M6 complete solely from this handoff or the test count.** Review the current Git status/history, preserve the checkpoint, obtain any needed live Telegram validation on the user's side, and wait for explicit user acceptance before treating M6 as complete. Do not start M7.

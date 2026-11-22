@@ -11,6 +11,7 @@ from telegram.ext import ApplicationHandlerStop
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.admins import AdminRepository
 from media_bot.db.database import Database
+from media_bot.db.repositories import UploaderRepository
 from media_bot.db.rules import CategoryRepository, RequirementRepository
 from media_bot.handlers.panel import (
     _home_markup,
@@ -261,6 +262,32 @@ async def test_add_admin_numeric_input_returns_to_staff_in_same_panel(database: 
     inbound.reply_text.assert_not_awaited()
 
 
+async def test_add_uploader_persists_and_refreshes_staff_view_in_same_panel(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    state = await open_panel(context)
+
+    await press(context, "staff")
+    await press(context, "staffrole", "uploaders", 0)
+    await press(context, "staffadd", "uploaders")
+    assert state["view"] == "input_staff_uploader"
+    assert state["input"] == {"kind": "add_uploader"}
+
+    inbound, _ = _private_input(text="810099")
+    await _send_expected_panel_input(context, inbound)
+
+    assert await UploaderRepository(database).is_active(810099)
+    assert state["input"] is None
+    assert state["view"] == "staff_uploaders"
+    assert "Uploader added successfully." in context.bot.edit_message_text.await_args.kwargs["text"]
+    assert "Remove 810099" in _keyboard_labels(
+        context.bot.edit_message_text.await_args.kwargs["reply_markup"]
+    )
+    assert context.bot.send_message.await_count == 1
+    assert context.bot.edit_message_text.await_args.kwargs["chat_id"] == ADMIN_ID
+    assert context.bot.edit_message_text.await_args.kwargs["message_id"] == 77
+
+
 async def test_panel_cannot_remove_environment_super_admin(database: Database) -> None:
     configure_admin_ids((ADMIN_ID,))
     admins = AdminRepository(database)
@@ -416,10 +443,11 @@ async def test_rule_wizard_creates_fake_join_rule_without_rule_syntax(database: 
     await press(context, "rule_type", "JOIN_CHAT")
     inbound, _ = _private_input(text="-100810020")
     await _send_expected_panel_input(context, inbound)
+    await press(context, "rule_link_continue")
     await press(context, "rule_verify", "fake")
     await press(context, "rule_wait", 5)
     confirmation = await press(context, "rule_wait_done")
-    assert "Fake (wait only)" in confirmation.edit_message_text.await_args.kwargs["text"]
+    assert "Fake (prompt + wait)" in confirmation.edit_message_text.await_args.kwargs["text"]
     saved = await press(context, "rule_save")
 
     rules = await RequirementRepository(database).list_for_scope(None)
@@ -434,10 +462,63 @@ async def test_rule_wizard_creates_fake_join_rule_without_rule_syntax(database: 
     assert saved.edit_message_text.await_count == 1
 
 
+async def test_rule_wizard_saves_custom_telegram_prompt_link(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    state = await open_panel(context)
+    await _open_global_rule_wizard(context)
+    await press(context, "rule_type", "JOIN_CHAT")
+    target, _ = _private_input(text="-100810070")
+    await _send_expected_panel_input(context, target)
+    link_screen = context.bot.edit_message_text.await_args.kwargs
+    assert state["view"] == "rule_wizard_link"
+    assert "Opening a link does not prove membership" in link_screen["text"]
+
+    await press(context, "rule_link_edit")
+    invalid, _ = _private_input(text="https://example.com/channel")
+    await _send_expected_panel_input(context, invalid)
+    assert state["input"] == {"kind": "rule_link"}
+    assert "https://t.me/channelname" in context.bot.edit_message_text.await_args.kwargs["text"]
+
+    valid, _ = _private_input(text="https://t.me/+AbCdEf123")
+    await _send_expected_panel_input(context, valid)
+    assert state["wizard"]["link_url"] == "https://t.me/+AbCdEf123"
+    await press(context, "rule_link_continue")
+    await press(context, "rule_verify", "fake")
+    await press(context, "rule_wait", 0)
+    confirmation = await press(context, "rule_wait_done")
+    assert "Prompt link: https://t.me/+AbCdEf123" in confirmation.edit_message_text.await_args.kwargs["text"]
+    await press(context, "rule_save")
+
+    rule = (await RequirementRepository(database).list_for_scope(None))[0]
+    assert rule.settings["link_url"] == "https://t.me/+AbCdEf123"
+
+
+async def test_forwarded_public_group_auto_adds_link_to_prompt(database: Database) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    await open_panel(context)
+    await _open_global_rule_wizard(context)
+    await press(context, "rule_type", "JOIN_CHAT")
+    forwarded, _ = _private_input(
+        text=None,
+        forward_origin=SimpleNamespace(
+            type="chat", chat=SimpleNamespace(id=-100810071, username="study_group")
+        ),
+    )
+    await _send_expected_panel_input(context, forwarded)
+
+    state = context.user_data["m6_admin_panel"]
+    assert state["wizard"]["target"] == -100810071
+    assert state["wizard"]["link_url"] == "https://t.me/study_group"
+    assert "Prompt link: https://t.me/study_group" in context.bot.edit_message_text.await_args.kwargs["text"]
+
+
 @pytest.mark.parametrize(
     ("rule_type", "forward_style", "expected_id"),
     [
         ("JOIN_CHAT", "origin_channel", -100810021),
+        ("JOIN_CHAT", "origin_group", -100810025),
         ("REACT", "legacy_channel", -100810022),
         ("START_BOT", "origin_user", 810_023),
         ("START_BOT", "legacy_user", 810_024),
@@ -457,6 +538,10 @@ async def test_rule_target_is_extracted_from_forwarded_channel_or_user(
         attrs["forward_origin"] = SimpleNamespace(
             type="channel", chat=SimpleNamespace(id=expected_id)
         )
+    elif forward_style == "origin_group":
+        attrs["forward_origin"] = SimpleNamespace(
+            type="chat", chat=SimpleNamespace(id=expected_id)
+        )
     elif forward_style == "legacy_channel":
         attrs["forward_from_chat"] = SimpleNamespace(id=expected_id)
     elif forward_style == "origin_user":
@@ -469,7 +554,7 @@ async def test_rule_target_is_extracted_from_forwarded_channel_or_user(
     await _send_expected_panel_input(context, inbound)
 
     assert state["wizard"]["target"] == expected_id
-    assert state["view"] == "rule_wizard_verification"
+    assert state["view"] == "rule_wizard_link"
 
 
 @pytest.mark.parametrize(
@@ -518,6 +603,7 @@ async def test_real_join_wizard_warns_when_bot_is_not_admin(database: Database) 
     await press(context, "rule_type", "JOIN_CHAT")
     inbound, _ = _private_input(text="-100810025")
     await _send_expected_panel_input(context, inbound)
+    await press(context, "rule_link_continue")
 
     warning = await press(context, "rule_verify", "real")
 
@@ -544,11 +630,27 @@ async def test_react_wizard_saves_button_selected_windows(database: Database) ->
         ),
     )
     await _send_expected_panel_input(context, inbound)
+    await press(context, "rule_link_continue")
     await press(context, "rule_verify", "fake")
     await press(context, "rule_wait", 3)
     await press(context, "rule_wait_done")
     window_screen = await press(context, "rule_message_window", 10)
     assert "Cancel" in _keyboard_labels(window_screen.edit_message_text.await_args.kwargs["reply_markup"])
+    window_markup = window_screen.edit_message_text.await_args.kwargs["reply_markup"]
+    message_choices = {
+        int(button.callback_data.rsplit(":", 1)[-1])
+        for row in window_markup.inline_keyboard
+        for button in row
+        if ":rule_message_window:" in button.callback_data
+    }
+    day_choices = {
+        int(button.callback_data.rsplit(":", 1)[-1])
+        for row in window_markup.inline_keyboard
+        for button in row
+        if ":rule_day_window:" in button.callback_data
+    }
+    assert message_choices == {0, 3, 5, 10}
+    assert day_choices == {0, 7, 30}
     await press(context, "rule_day_window", 7)
     await press(context, "rule_windows_done")
     await press(context, "rule_save")
@@ -571,6 +673,13 @@ async def test_timed_wait_wizard_skips_target_and_saves_zero_wait(database: Data
     assert state["wizard"]["target"] is None
     assert state["view"] == "rule_wizard_wait"
     assert "Real" not in _keyboard_labels(wait_screen.edit_message_text.await_args.kwargs["reply_markup"])
+    wait_choices = {
+        int(button.callback_data.rsplit(":", 1)[-1])
+        for row in wait_screen.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+        for button in row
+        if ":rule_wait:" in button.callback_data
+    }
+    assert wait_choices == {0, 3, 5, 10, 30, 60}
     await press(context, "rule_wait", 0)
     await press(context, "rule_wait_done")
     await press(context, "rule_save")
@@ -582,7 +691,7 @@ async def test_timed_wait_wizard_skips_target_and_saves_zero_wait(database: Data
 
 
 @pytest.mark.parametrize(
-    "screen", ["type", "target", "verification", "wait", "react_windows", "confirm", "join_warning"]
+    "screen", ["type", "target", "link", "link_input", "verification", "wait", "react_windows", "confirm", "join_warning"]
 )
 async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
     database: Database, screen: str
@@ -593,10 +702,22 @@ async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
     query = await _open_global_rule_wizard(context)
     if screen == "target":
         query = await press(context, "rule_type", "JOIN_CHAT")
+    elif screen == "link":
+        await press(context, "rule_type", "JOIN_CHAT")
+        inbound, _ = _private_input(text="-100810027")
+        await _send_expected_panel_input(context, inbound)
+        query = SimpleNamespace(edit_message_text=AsyncMock())
+        await panel_handlers._show_rule_link(context, state, query=query)
+    elif screen == "link_input":
+        await press(context, "rule_type", "JOIN_CHAT")
+        inbound, _ = _private_input(text="-100810027")
+        await _send_expected_panel_input(context, inbound)
+        query = await press(context, "rule_link_edit")
     elif screen == "verification":
         await press(context, "rule_type", "JOIN_CHAT")
         inbound, _ = _private_input(text="-100810027")
         await _send_expected_panel_input(context, inbound)
+        await press(context, "rule_link_continue")
         query = SimpleNamespace(edit_message_text=AsyncMock())
         await panel_handlers._show_rule_verification(context, state, query=query)
     elif screen == "wait":
@@ -606,6 +727,7 @@ async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
         await press(context, "rule_type", "REACT")
         inbound, _ = _private_input(text="-100810027")
         await _send_expected_panel_input(context, inbound)
+        await press(context, "rule_link_continue")
         await press(context, "rule_verify", "fake")
         query = await press(context, "rule_wait_done")
     elif screen == "confirm":
@@ -617,6 +739,7 @@ async def test_every_rule_wizard_screen_has_cancel_and_clears_state(
         await press(context, "rule_type", "JOIN_CHAT")
         inbound, _ = _private_input(text="-100810028")
         await _send_expected_panel_input(context, inbound)
+        await press(context, "rule_link_continue")
         query = await press(context, "rule_verify", "real")
 
     assert "Cancel" in _keyboard_labels(query.edit_message_text.await_args.kwargs["reply_markup"])
@@ -634,11 +757,12 @@ async def test_start_bot_wizard_explains_real_verification_is_unsupported(databa
     await press(context, "rule_type", "START_BOT")
     inbound, _ = _private_input(text="810029")
     await _send_expected_panel_input(context, inbound)
+    verification = await press(context, "rule_link_continue")
 
-    verification = context.bot.edit_message_text.await_args.kwargs
-    assert "Real START_BOT verification is not supported" in verification["text"]
-    labels = _keyboard_labels(verification["reply_markup"])
-    assert "Fake (Wait Only)" in labels
+    text = verification.edit_message_text.await_args.kwargs["text"]
+    assert "Real START_BOT verification is not supported" in text
+    labels = _keyboard_labels(verification.edit_message_text.await_args.kwargs["reply_markup"])
+    assert "Fake (Prompt + Wait)" in labels
     assert "Real" not in labels
 
 

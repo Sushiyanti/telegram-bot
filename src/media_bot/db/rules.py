@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from media_bot.db.database import Database
 from media_bot.db.repositories import InvalidRecord, RecordNotFound, _validate_text
@@ -233,6 +234,7 @@ class RequirementRepository:
         wait_seconds: int,
         last_x_messages: int | None = None,
         last_x_days: int | None = None,
+        link_url: str | None = None,
     ) -> Requirement:
         requirement_type = str(requirement_type).upper()
         if requirement_type not in _REQUIREMENT_TYPES:
@@ -248,7 +250,12 @@ class RequirementRepository:
         if category_id is not None:
             _positive_id(category_id, "category_id")
         stored_target = _validate_target(requirement_type, target)
+        stored_link = validate_telegram_link(link_url)
+        if stored_link is not None and requirement_type == "TIMED_WAIT":
+            raise InvalidRecord("Telegram links can only be used with channel or bot requirements")
         settings: dict[str, object] = {"is_fake": is_fake, "wait_seconds": wait_seconds}
+        if stored_link is not None:
+            settings["link_url"] = stored_link
         if requirement_type == "REACT":
             messages = 5 if last_x_messages is None else last_x_messages
             days = 0 if last_x_days is None else last_x_days
@@ -578,6 +585,34 @@ def _validate_target(requirement_type: str, target: str | int | None) -> str | N
         raise InvalidRecord("START_BOT target must be an @username or numeric user ID") from exc
     _positive_id(numeric_target, "START_BOT target")
     return str(numeric_target)
+
+
+def validate_telegram_link(value: object) -> str | None:
+    """Accept only safe HTTPS links Telegram can open in an inline URL button."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidRecord("link_url must be a Telegram HTTPS URL")
+    raw = value.strip()
+    if not raw:
+        return None
+    if len(raw) > 512 or any(character.isspace() for character in raw):
+        raise InvalidRecord("link_url must be a Telegram HTTPS URL no longer than 512 characters")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise InvalidRecord("link_url must be a Telegram HTTPS URL") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.hostname not in {"t.me", "telegram.me"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or not parsed.path.strip("/")
+    ):
+        raise InvalidRecord("link_url must use https://t.me/ or https://telegram.me/")
+    return raw
 
 
 def _emoji_key(value: str) -> str:

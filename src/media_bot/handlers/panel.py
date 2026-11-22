@@ -21,6 +21,7 @@ from media_bot.db.rules import (
     BotSettingsRepository,
     CategoryRepository,
     RequirementRepository,
+    validate_telegram_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -368,6 +369,29 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         raise ApplicationHandlerStop
 
+    if pending.get("kind") == "rule_link":
+        wizard = state.get("wizard")
+        if not isinstance(wizard, dict):
+            _clear_pending_flow(state)
+            await _edit_panel(context, state, "Admin Control Panel", _home_markup(state))
+            return
+        try:
+            link_url = validate_telegram_link(getattr(message, "text", None))
+        except InvalidRecord:
+            link_url = None
+        if link_url is None:
+            await _edit_panel(
+                context,
+                state,
+                "Send a Telegram link such as https://t.me/channelname, or continue without a link.",
+                _rule_link_input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        wizard["link_url"] = link_url
+        state["input"] = None
+        await _show_rule_link(context, state, notice="Telegram link saved.")
+        raise ApplicationHandlerStop
+
     if pending.get("kind") == "rule_target":
         wizard = state.get("wizard")
         if not isinstance(wizard, dict):
@@ -395,8 +419,9 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             raise ApplicationHandlerStop
         wizard["target"] = target
+        wizard["link_url"] = _forwarded_target_url(message, rule_type)
         state["input"] = None
-        await _show_rule_verification(context, state)
+        await _show_rule_link(context, state)
         raise ApplicationHandlerStop
 
     state["input"] = None
@@ -433,29 +458,54 @@ def _is_forwarded_message(message: Any) -> bool:
 
 
 def _forwarded_target_id(message: Any, requirement_type: str) -> int | None:
-    expected_origin = "user" if requirement_type == "START_BOT" else "channel"
+    expected_origins = {"user"} if requirement_type == "START_BOT" else {"channel", "chat"}
     origin = getattr(message, "forward_origin", None)
     if origin is not None:
-        if getattr(origin, "type", None) != expected_origin:
+        if getattr(origin, "type", None) not in expected_origins:
             return None
-        if expected_origin == "channel":
+        if requirement_type != "START_BOT":
             candidate = getattr(getattr(origin, "chat", None), "id", None)
             return candidate if _valid_chat_id(candidate) else None
         candidate = getattr(getattr(origin, "sender_user", None), "id", None)
         return candidate if _valid_user_id(candidate) else None
     forwarded_chat = getattr(message, "forward_from_chat", None)
     if forwarded_chat is not None:
-        if expected_origin != "channel":
+        if requirement_type == "START_BOT":
             return None
         candidate = getattr(forwarded_chat, "id", None)
         return candidate if _valid_chat_id(candidate) else None
     forwarded_user = getattr(message, "forward_from", None)
     if forwarded_user is not None:
-        if expected_origin != "user":
+        if requirement_type != "START_BOT":
             return None
         candidate = getattr(forwarded_user, "id", None)
         return candidate if _valid_user_id(candidate) else None
     return None
+
+
+def _forwarded_target_url(message: Any, requirement_type: str) -> str | None:
+    origin = getattr(message, "forward_origin", None)
+    if origin is not None:
+        origin_type = getattr(origin, "type", None)
+        expected = {"user"} if requirement_type == "START_BOT" else {"channel", "chat"}
+        if origin_type not in expected:
+            return None
+        source = (
+            getattr(origin, "sender_user", None)
+            if requirement_type == "START_BOT"
+            else getattr(origin, "chat", None)
+        )
+        candidate = getattr(source, "username", None)
+    elif requirement_type == "START_BOT":
+        candidate = getattr(getattr(message, "forward_from", None), "username", None)
+    else:
+        candidate = getattr(getattr(message, "forward_from_chat", None), "username", None)
+    if not isinstance(candidate, str):
+        return None
+    username = candidate.lstrip("@")
+    if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) is None:
+        return None
+    return f"https://t.me/{username}"
 
 
 def _forwarded_storage_chat_id(message: Any) -> int | None:
@@ -576,6 +626,18 @@ async def _dispatch_callback(
         )
     elif action == "rule_type":
         await _select_rule_type(context, state, _str_arg(args, 0), query=query)
+    elif action == "rule_link_edit":
+        await _start_rule_link_input(context, state, query=query)
+    elif action == "rule_link_continue":
+        state["input"] = None
+        await _show_rule_verification(context, state, query=query)
+    elif action == "rule_link_skip":
+        _require_rule_wizard(state)["link_url"] = None
+        state["input"] = None
+        await _show_rule_verification(context, state, query=query)
+    elif action == "rule_link_remove":
+        _require_rule_wizard(state)["link_url"] = None
+        await _show_rule_link(context, state, query=query, notice="Telegram link removed.")
     elif action == "rule_verify":
         await _select_rule_verification(context, state, _str_arg(args, 0), query=query)
     elif action == "rule_continue":
@@ -880,7 +942,8 @@ async def _show_requirements(
         lines.append("None. Global rules and inherited child rules still apply where configured.")
     for requirement in requirements:
         target = "—" if requirement.target is None else requirement.target
-        lines.append(f"#{requirement.id} {requirement.type} | {target} | wait {requirement.settings.get('wait_seconds', 0)}s")
+        link_note = " | prompt link" if requirement.settings.get("link_url") else ""
+        lines.append(f"#{requirement.id} {requirement.type} | {target} | wait {requirement.settings.get('wait_seconds', 0)}s{link_note}")
         rows.append([_button(f"Delete rule #{requirement.id}", state, "reqdelconfirm", "g" if category_id is None else category_id, requirement.id)])
     if notice:
         lines.append(f"\n{notice}")
@@ -932,6 +995,69 @@ def _input_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
     return _markup([[_button("Cancel", state, action)]])
 
 
+def _rule_link_input_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
+    return _markup([
+        [_button("Continue without link", state, "rule_link_skip")],
+        [_button("Cancel", state, "rule_cancel")],
+    ])
+
+
+async def _show_rule_link(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+    notice: str = "",
+) -> None:
+    wizard = _require_rule_wizard(state)
+    link_url = wizard.get("link_url")
+    wizard["step"] = "link"
+    state.update({"view": "rule_wizard_link", "input": None})
+    _touch_pending_flow(state)
+    rows: list[list[InlineKeyboardButton]] = []
+    if isinstance(link_url, str):
+        rows.extend([
+            [_button("Continue", state, "rule_link_continue")],
+            [_button("Change Link", state, "rule_link_edit")],
+            [_button("Remove Link", state, "rule_link_remove")],
+        ])
+        link_text = f"Prompt link: {link_url}"
+    else:
+        rows.extend([
+            [_button("Add Telegram Link", state, "rule_link_edit")],
+            [_button("Continue without link", state, "rule_link_continue")],
+        ])
+        link_text = "Prompt link: none"
+    rows.append([_button("Cancel", state, "rule_cancel")])
+    lines = [
+        "Optional Telegram link for the user-facing prompt.",
+        "Opening a link does not prove membership or a reaction.",
+        link_text,
+    ]
+    if notice:
+        lines.append(notice)
+    await _edit_panel(context, state, "\n".join(lines), _markup(rows), query=query)
+
+
+async def _start_rule_link_input(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+) -> None:
+    wizard = _require_rule_wizard(state)
+    wizard["step"] = "link_input"
+    state.update({"view": "rule_wizard_link_input", "input": {"kind": "rule_link"}})
+    _touch_pending_flow(state)
+    await _edit_panel(
+        context,
+        state,
+        "Send a Telegram HTTPS link such as https://t.me/channelname.",
+        _rule_link_input_markup(state),
+        query=query,
+    )
+
+
 def _require_rule_wizard(state: dict[str, Any]) -> dict[str, Any]:
     wizard = state.get("wizard")
     if not isinstance(wizard, dict):
@@ -959,7 +1085,7 @@ async def _select_rule_type(
     state.update({"view": "rule_wizard_target", "input": {"kind": "rule_target"}})
     _touch_pending_flow(state)
     if rule_type in {"JOIN_CHAT", "REACT"}:
-        prompt = "Forward a message from the target channel, or paste its numeric chat ID."
+        prompt = "Forward a message from the target channel or group, or paste its numeric chat ID."
     else:
         prompt = "Forward a message from the target user, or paste the user's numeric ID."
     await _edit_panel(context, state, prompt, _input_markup(state), query=query)
@@ -977,14 +1103,14 @@ async def _show_rule_verification(
     state.update({"view": "rule_wizard_verification", "input": None})
     rows: list[list[InlineKeyboardButton]] = []
     if rule_type == "START_BOT":
-        rows.append([_button("Fake (Wait Only)", state, "rule_verify", "fake")])
-        text = "Real START_BOT verification is not supported. Choose Fake (wait-only)."
+        rows.append([_button("Fake (Prompt + Wait)", state, "rule_verify", "fake")])
+        text = "Real START_BOT verification is not supported. Choose the prompt-and-wait pass."
     else:
         rows.append([
             _button("Real", state, "rule_verify", "real"),
             _button("Fake", state, "rule_verify", "fake"),
         ])
-        text = "Choose how this rule is verified: Real checks eligibility; Fake only waits."
+        text = "Choose how this rule is handled: Real checks eligibility; Fake shows a prompt, then passes after the selected wait."
     rows.append([_button("Cancel", state, "rule_cancel")])
     await _edit_panel(context, state, text, _markup(rows), query=query)
 
@@ -1046,7 +1172,7 @@ async def _show_rule_wait(
     wait_seconds = int(wizard.get("wait_seconds", 0))
     wizard.update({"step": "wait", "wait_seconds": wait_seconds})
     state.update({"view": "rule_wizard_wait", "input": None})
-    options = (0, 1, 3, 5, 10, 30, 60)
+    options = (0, 3, 5, 10, 30, 60)
     rows = [
         [_button(f"{'✓ ' if value == wait_seconds else ''}{value}s", state, "rule_wait", value)
          for value in options[:4]],
@@ -1065,7 +1191,7 @@ async def _set_rule_wait(
     *,
     query: Any = None,
 ) -> None:
-    if wait_seconds not in {0, 1, 3, 5, 10, 30, 60}:
+    if wait_seconds not in {0, 3, 5, 10, 30, 60}:
         raise ValueError("Unsupported wait-time option")
     _require_rule_wizard(state)["wait_seconds"] = wait_seconds
     await _show_rule_wait(context, state, query=query)
@@ -1082,13 +1208,11 @@ async def _show_react_windows(
     wizard.setdefault("last_x_days", 0)
     wizard["step"] = "react_windows"
     state.update({"view": "rule_wizard_react_windows", "input": None})
-    messages = (0, 3, 5, 10, 20, 50, 100)
-    days = (0, 1, 7, 30, 90)
+    messages = (0, 3, 5, 10)
+    days = (0, 7, 30)
     rows = [
         [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}{'No message limit' if value == 0 else f'Last {value} posts'}",
-                 state, "rule_message_window", value) for value in messages[:4]],
-        [_button(f"{'✓ ' if wizard['last_x_messages'] == value else ''}{'No message limit' if value == 0 else f'Last {value} posts'}",
-                 state, "rule_message_window", value) for value in messages[4:]],
+                 state, "rule_message_window", value) for value in messages],
         [_button(f"{'✓ ' if wizard['last_x_days'] == value else ''}Days {value}",
                  state, "rule_day_window", value) for value in days],
         [_button("Continue", state, "rule_windows_done")],
@@ -1112,8 +1236,8 @@ async def _set_react_window(
     query: Any = None,
 ) -> None:
     allowed = {
-        "last_x_messages": {0, 3, 5, 10, 20, 50, 100},
-        "last_x_days": {0, 1, 7, 30, 90},
+        "last_x_messages": {0, 3, 5, 10},
+        "last_x_days": {0, 7, 30},
     }
     if setting not in allowed or value not in allowed[setting]:
         raise ValueError("Unsupported REACT window")
@@ -1133,13 +1257,14 @@ async def _show_rule_confirmation(
     if rule_type == "TIMED_WAIT":
         verification = "Wait only (no eligibility check)"
     else:
-        verification = "Fake (wait only)" if wizard.get("is_fake") else "Real"
+        verification = "Fake (prompt + wait)" if wizard.get("is_fake") else "Real"
     lines = [
         "Confirm rule",
         f"Type: {rule_type}",
         f"Target: {target if target is not None else 'Not applicable'}",
         f"Verification: {verification}",
         f"Wait: {wizard.get('wait_seconds', 0)} seconds",
+        f"Prompt link: {wizard.get('link_url') or 'None'}",
     ]
     if rule_type == "REACT":
         message_window = (
@@ -1178,6 +1303,7 @@ async def _save_rule(
         wait_seconds=int(wizard.get("wait_seconds", 0)),
         last_x_messages=int(wizard.get("last_x_messages", 5)) if rule_type == "REACT" else None,
         last_x_days=int(wizard.get("last_x_days", 0)) if rule_type == "REACT" else None,
+        link_url=wizard.get("link_url") if isinstance(wizard.get("link_url"), str) else None,
     )
     category_id = wizard.get("category_id")
     scope_name = str(wizard.get("scope_name", "Global"))
