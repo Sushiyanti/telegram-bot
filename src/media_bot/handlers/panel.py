@@ -1145,7 +1145,10 @@ async def _select_rule_verification(
     wizard["is_fake"] = mode == "fake"
     if rule_type == "JOIN_CHAT" and mode == "real":
         target = wizard.get("target")
-        if not isinstance(target, int) or not await _bot_is_chat_admin(context, target):
+        if not isinstance(target, int):
+            raise InvalidRecord("JOIN_CHAT target is missing")
+        bot_admin_status = await _bot_is_chat_admin(context, target)
+        if bot_admin_status is False or bot_admin_status is None:
             wizard["step"] = "join_warning"
             state["view"] = "rule_wizard_admin_warning"
             rows = [
@@ -1156,7 +1159,11 @@ async def _select_rule_verification(
             await _edit_panel(
                 context,
                 state,
-                "⚠️ Bot is not admin in this channel. Real checks will fail.",
+                (
+                    "⚠️ Bot is not an admin in this channel. Real checks may fail."
+                    if bot_admin_status is False
+                    else "⚠️ Could not verify whether the bot is an admin. Telegram lookup failed; check permissions and retry."
+                ),
                 _markup(rows),
                 query=query,
             )
@@ -1164,7 +1171,9 @@ async def _select_rule_verification(
     await _show_rule_wait(context, state, query=query)
 
 
-async def _bot_is_chat_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> bool:
+async def _bot_is_chat_admin(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int
+) -> bool | None:
     bot = context.bot
     bot_id = getattr(bot, "id", None)
     try:
@@ -1172,7 +1181,7 @@ async def _bot_is_chat_admin(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -
             bot_id = int((await bot.get_me()).id)
         member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
     except Exception:
-        return False
+        return None
     return getattr(member, "status", None) in {"administrator", "creator"}
 
 

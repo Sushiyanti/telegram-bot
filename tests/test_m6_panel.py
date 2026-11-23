@@ -610,13 +610,40 @@ async def test_real_join_wizard_warns_when_bot_is_not_admin(database: Database) 
     warning = await press(context, "rule_verify", "real")
 
     assert warning.edit_message_text.await_args.kwargs["text"] == (
-        "⚠️ Bot is not admin in this channel. Real checks will fail."
+        "⚠️ Bot is not an admin in this channel. Real checks may fail."
     )
     assert "Cancel" in _keyboard_labels(warning.edit_message_text.await_args.kwargs["reply_markup"])
     context.bot.get_chat_member.assert_awaited_once_with(chat_id=-100810025, user_id=998877)
     await press(context, "rule_fake")
     assert state["wizard"]["is_fake"] is True
     assert state["view"] == "rule_wizard_wait"
+
+
+async def test_real_join_wizard_distinguishes_unavailable_admin_lookup(
+    database: Database,
+) -> None:
+    configure_admin_ids((ADMIN_ID,))
+    context = make_context(database)
+    context.bot.id = 998877
+    context.bot.get_chat_member = AsyncMock(side_effect=RuntimeError("API unavailable"))
+    await open_panel(context)
+    await _open_global_rule_wizard(context)
+    await press(context, "rule_type", "JOIN_CHAT")
+    inbound, _ = _private_input(text="-100810025")
+    await _send_expected_panel_input(context, inbound)
+    await press(context, "rule_link_continue")
+
+    warning = await press(context, "rule_verify", "real")
+
+    warning_text = warning.edit_message_text.await_args.kwargs["text"]
+    assert "Could not verify whether the bot is an admin" in warning_text
+    assert "not an admin" not in warning_text
+    assert "Continue Anyway" in _keyboard_labels(
+        warning.edit_message_text.await_args.kwargs["reply_markup"]
+    )
+    context.bot.get_chat_member.assert_awaited_once_with(
+        chat_id=-100810025, user_id=998877
+    )
 
 
 async def test_react_wizard_saves_button_selected_windows(database: Database) -> None:

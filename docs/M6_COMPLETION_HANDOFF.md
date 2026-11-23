@@ -6,12 +6,11 @@
 
 - Repository: `/tmp/telegram-bot-review`
 - Branch: `main`
-- Pushed base: `a7251094b686f62c13632fb70453c0a95947f2c6` (`Improve M6 prompt links and rule flow coverage`), still equal to `origin/main`.
-- The current worktree contains **uncommitted M6 changes**. Preserve and inspect them; do not reset or overwrite.
+- Pushed base for this continuation: `f9621f3b96caf8958c02c3fd74866d687b820504` (`Add configurable real-check failure policy`). Check current Git status, `HEAD`, and `origin/main` before continuing; this handoff is updated during ongoing work.
 - Schema remains version 6. The changes below use the existing `bot_settings` table; no migration or dependency was added.
 - No live Telegram action was performed; no designated test channels/users or authorized test credentials are present.
-- Latest validation: focused `tests/test_m5_rules.py tests/test_m6_panel.py` — **95 passed**; full `uv run --locked --group dev pytest -q` — **235 passed**; compileall passed; `git diff --check` passed. A temporary DB reported `PRAGMA user_version=6`; no `REAL_CHECK_FAILURE_POLICY` row is seeded, so the code default is fail-closed.
-- Earlier in this resumed sandbox, an M2 album-upload test failed in one full-suite run and a targeted rerun. Later full-suite runs passed; the cause was not established. This M6 change does not modify upload handling. Do not claim that the M6 work fixed that earlier observation.
+- Latest validation after the JOIN wizard fix: focused `tests/test_m5_rules.py tests/test_m6_panel.py` — **96 passed**; full `uv run --locked --group dev pytest -q` — **236 passed**; compileall and `git diff --check` passed. A temporary DB reported `PRAGMA user_version=6`; no `REAL_CHECK_FAILURE_POLICY` row is seeded, so the code default is fail-closed.
+- The previously intermittent M2 partial-album test failure was caused by checking pending-row cleanup after a fixed 40 ms sleep while its async failure handler was still running. The test now awaits its settle task; it passed **10/10** isolated repetitions. Upload implementation was not changed.
 
 ## User-confirmed decisions
 
@@ -27,7 +26,7 @@ These resolve the prior open product questions; do not ask the user again unless
 
 ### Real-check failure policy
 
-`BotSettingsRepository` stores `REAL_CHECK_FAILURE_POLICY` in the existing key/value table. An absent or invalid setting, or a setting-read error during check handling, resolves fail-closed. Admins can switch between `fail_closed` and `wait_fallback` from the Settings panel; changes are audited. Real JOIN_CHAT API errors and Real REACT API/admin/state lookup failures use the selected policy. A confirmed user denial (not a member/no qualifying reaction) remains a denial. With fail-closed, `RequirementEvaluator.verify` returns false before `start_command` calls `ShareLinkService.consume`, so the share use remains available. With `wait_fallback`, the rule's configured wait is applied and delivery may proceed, consuming the usual use. Recipient wording does not claim the wait proves verification.
+`BotSettingsRepository` stores `REAL_CHECK_FAILURE_POLICY` in the existing key/value table. An absent or invalid setting, or a setting-read error during check handling, resolves fail-closed. Admins can switch between `fail_closed` and `wait_fallback` from the Settings panel; changes are audited. Real JOIN_CHAT API errors and Real REACT API/admin/state lookup failures use the selected policy. A confirmed user denial (not a member/no qualifying reaction) remains a denial. With fail-closed, `RequirementEvaluator.verify` returns false before `start_command` calls `ShareLinkService.consume`, so the share use remains available. With `wait_fallback`, the rule's configured wait is applied and delivery may proceed, consuming the usual use. Recipient wording does not claim the wait proves verification. The JOIN wizard also distinguishes a confirmed non-admin lookup from an unavailable Telegram lookup.
 
 ### Category deletion
 
@@ -43,8 +42,7 @@ These resolve the prior open product questions; do not ask the user again unless
 ## Remaining boundaries / next steps
 
 - M6 is **not complete or live-accepted**. Tests mock Telegram calls; no live Telegram validation has been performed.
-- Recheck Git state and carefully inspect the complete uncommitted diff. Do not assume passing tests prove every panel action or product requirement is finished.
-- Review remaining M6 UX/security issues, including how the JOIN wizard distinguishes a confirmed non-admin from an unavailable lookup, and add only concrete missing tests.
+- Continue auditing remaining M6 flows against user requirements; do not treat prior checkpoint notes as exhaustive. The scoped source/test audit found no other concrete implementation gap after the JOIN wizard lookup distinction was added.
 - Category creation still warns about posting rights without a live preflight check; do not test against production channels without authorization.
 - Large-file end-to-end guarantees remain unverified. Optional per-link expiry UI remains outside M6; preserve non-expiring links by default.
 - Re-run the full tests, compilation, diff check, and schema check after further edits. Report mocked/live evidence precisely.
