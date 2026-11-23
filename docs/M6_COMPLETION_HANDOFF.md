@@ -1,12 +1,12 @@
 # Telegram File-Sharing Bot — M6 Completion Handoff
 
-**Purpose:** Continue M6 from the pushed checkpoint below. The checkpoint was intentionally saved **mid-milestone** as a resumable state; it is not a declaration that M6 is complete or that the code is bug-free. Unfinished behavior, bugs, regressions, or test failures may remain. Carefully inspect the repository, history, source, tests, and docs before changing anything. Do not begin M7.
+**Status:** M6 was explicitly accepted by the user on 2026-11-23 based on the mocked validation summarized below. This acceptance does **not** constitute live Telegram validation; real API behavior and end-to-end transfer sizes remain unverified.
 
 ## Repository and continuation state
 
 - Repository: `/tmp/telegram-bot-review`
 - Branch: `main`
-- Pushed base for this continuation: `f9621f3b96caf8958c02c3fd74866d687b820504` (`Add configurable real-check failure policy`). Check current Git status, `HEAD`, and `origin/main` before continuing; this handoff is updated during ongoing work.
+- M6 implementation commits are pushed through `e5c62da634db6a6d23ca373391175aa074d638d1`; check current Git status, `HEAD`, and `origin/main` before continuing.
 - Schema remains version 6. The changes below use the existing `bot_settings` table; no migration or dependency was added.
 - No live Telegram action was performed; no designated test channels/users or authorized test credentials are present.
 - Latest validation after the JOIN wizard fix: focused `tests/test_m5_rules.py tests/test_m6_panel.py` — **96 passed**; full `uv run --locked --group dev pytest -q` — **236 passed**; compileall and `git diff --check` passed. A temporary DB reported `PRAGMA user_version=6`; no `REAL_CHECK_FAILURE_POLICY` row is seeded, so the code default is fail-closed.
@@ -22,7 +22,7 @@ These resolve the prior open product questions; do not ask the user again unless
 4. On confirmed category deletion, revoke share links for items assigned to that category while retaining media/items and storage messages, reassigning items to `Default`, removing graph edges to the deleted category, and preserving linked categories/shared storage channels. Keep the existing explicit choice to keep or delete orphaned requirements.
 5. Keep Settings suitable for future expansion. M6 baseline controls are the regular-user command/upload lock and Real-check failure policy; do not invent unrelated settings or a broad permission matrix.
 
-## Implemented in the current worktree
+## Accepted M6 implementation
 
 ### Real-check failure policy
 
@@ -39,11 +39,11 @@ These resolve the prior open product questions; do not ask the user again unless
 - `tests/test_m6_panel.py` covers Settings policy selection and category-delete warning text.
 - `docs/M6_ADMIN_PANEL.md`, `docs/M5_CATEGORIES_AND_REQUIREMENTS.md`, and `docs/decision-log.md` describe the implemented behavior.
 
-## Remaining boundaries / next steps
+## M6 validation boundary and transition
 
-- M6 is **not complete or live-accepted**. Tests mock Telegram calls; no live Telegram validation has been performed.
-- Continue auditing remaining M6 flows against user requirements; do not treat prior checkpoint notes as exhaustive. The scoped source/test audit found no other concrete implementation gap after the JOIN wizard lookup distinction was added.
+- M6 is **accepted based on mocked validation**. All automated Telegram calls are mocked; no live Telegram validation has been performed.
+- The scoped source/test audit found no other concrete implementation gap after the JOIN wizard lookup distinction was added. Acceptance is not a claim of bug-free or live-verified behavior.
 - Category creation still warns about posting rights without a live preflight check; do not test against production channels without authorization.
 - Large-file end-to-end guarantees remain unverified. Optional per-link expiry UI remains outside M6; preserve non-expiring links by default.
-- Re-run the full tests, compilation, diff check, and schema check after further edits. Report mocked/live evidence precisely.
-- Stop at M6 and wait for explicit user acceptance before declaring the milestone complete or starting later work.
+- M7 begins with a scoped plan for isolated end-to-end transfer readiness and large-file capability verification. No transport change or file-size claim is authorized by this handoff alone; see `docs/M7_PLAN.md`.
+- Continue to report mocked and live evidence separately. Require a dedicated non-production Telegram environment before live integration tests.
