@@ -445,7 +445,9 @@ async def test_album_partial_copy_is_rejected_without_item_or_pending_rows(
         messages.append(message)
         await handler.handle_message(update, make_context(bot))
 
-    await asyncio.sleep(0.04)
+    settle_tasks = tuple(handler._album_tasks.values())
+    assert settle_tasks
+    await asyncio.gather(*settle_tasks)
 
     bot.copy_messages.assert_awaited_once()
     async with database.connection() as connection:
