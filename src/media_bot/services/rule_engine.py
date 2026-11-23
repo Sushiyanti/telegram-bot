@@ -7,7 +7,12 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from media_bot.db.rules import CategoryRepository, ReactionRepository, Requirement
+from media_bot.db.rules import (
+    BotSettingsRepository,
+    CategoryRepository,
+    ReactionRepository,
+    Requirement,
+)
 from media_bot.db.repositories import InvalidRecord
 from media_bot.db.rules import validate_telegram_link
 
@@ -18,8 +23,10 @@ class RequirementEvaluator:
     """Evaluate global, category, and recursively inherited rules before delivery."""
 
     def __init__(self, database) -> None:
+        self.database = database
         self.categories = CategoryRepository(database)
         self.reactions = ReactionRepository(database)
+        self.settings = BotSettingsRepository(database)
 
     async def verify(self, *, category_id: int, user_id: int, bot: Any, message: Any) -> bool:
         requirements = await self.categories.requirements_for(category_id)
@@ -53,9 +60,12 @@ class RequirementEvaluator:
                     chat_id=int(requirement.target), user_id=user_id
                 )
             except Exception as exc:
-                logger.warning("join_chat_check_failed (%s); using wait fallback", type(exc).__name__)
-                await _wait_with_message(message, wait_seconds)
-                return True
+                logger.warning("join_chat_check_failed (%s)", type(exc).__name__)
+                return await self._handle_real_check_unavailable(
+                    requirement, wait_seconds, message,
+                    "Membership could not be verified. Please try again later.",
+                    "Open required channel or group",
+                )
             status = str(getattr(membership, "status", "")).lower()
             is_member = status in {"creator", "administrator", "member"}
             if status == "restricted":
@@ -85,19 +95,36 @@ class RequirementEvaluator:
                     identity = await bot.get_me()
                     bot_id = int(identity.id)
                 membership = await bot.get_chat_member(chat_id=channel_id, user_id=bot_id)
-                if str(getattr(membership, "status", "")).lower() not in {"administrator", "creator"}:
-                    await _wait_with_message(message, wait_seconds)
-                    return True
+                bot_is_admin = str(getattr(membership, "status", "")).lower() in {
+                    "administrator", "creator"
+                }
             except Exception as exc:
-                logger.warning("reaction_admin_check_failed (%s); using wait fallback", type(exc).__name__)
-                await _wait_with_message(message, wait_seconds)
-                return True
-            has_reaction = await self.reactions.has_recent_reaction(
-                user_id=user_id,
-                channel_id=channel_id,
-                last_x_messages=last_x_messages,
-                last_x_days=int(settings.get("last_x_days", 0)),
-            )
+                logger.warning("reaction_check_unavailable (%s)", type(exc).__name__)
+                return await self._handle_real_check_unavailable(
+                    requirement, wait_seconds, message,
+                    "The channel reaction check is unavailable. Please try again later.",
+                    "Open required channel",
+                )
+            if not bot_is_admin:
+                return await self._handle_real_check_unavailable(
+                    requirement, wait_seconds, message,
+                    "The channel reaction check is unavailable. Please try again later.",
+                    "Open required channel",
+                )
+            try:
+                has_reaction = await self.reactions.has_recent_reaction(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    last_x_messages=last_x_messages,
+                    last_x_days=int(settings.get("last_x_days", 0)),
+                )
+            except Exception as exc:
+                logger.warning("reaction_state_check_failed (%s)", type(exc).__name__)
+                return await self._handle_real_check_unavailable(
+                    requirement, wait_seconds, message,
+                    "The channel reaction check is unavailable. Please try again later.",
+                    "Open required channel",
+                )
             if has_reaction:
                 return True
             await message.reply_text(
@@ -108,6 +135,25 @@ class RequirementEvaluator:
 
         logger.error("unknown_requirement_type")
         await message.reply_text("An access requirement could not be evaluated.")
+        return False
+
+    async def _handle_real_check_unavailable(
+        self,
+        requirement: Requirement,
+        wait_seconds: int,
+        message: Any,
+        denial_text: str,
+        link_label: str,
+    ) -> bool:
+        try:
+            policy = await self.settings.real_check_failure_policy()
+        except Exception as exc:
+            logger.error("real_check_failure_policy_read_failed (%s)", type(exc).__name__)
+            policy = BotSettingsRepository.REAL_CHECK_FAIL_CLOSED
+        if policy == BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK:
+            await _wait_with_message(message, wait_seconds)
+            return True
+        await message.reply_text(denial_text, reply_markup=_link_markup(requirement, link_label))
         return False
 
 

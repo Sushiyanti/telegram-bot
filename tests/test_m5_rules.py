@@ -262,7 +262,7 @@ async def test_category_deletion_reassigns_items_and_removes_links(database: Dat
     categories = CategoryRepository(database)
     default = await categories.default()
     removed = await categories.create("StorageA", -1007012345023)
-    child = await categories.create("StorageB", -1007012345024)
+    child = await categories.create("StorageB", removed.storage_channel_id)
     await categories.link("StorageA", "StorageB")
     saved = await ItemRepository(database).create_stored_item(
         MediaItem(
@@ -274,6 +274,18 @@ async def test_category_deletion_reassigns_items_and_removes_links(database: Dat
             storage_channel_id=removed.storage_channel_id,
         )
     )
+    survivor = await ItemRepository(database).create_stored_item(
+        MediaItem(
+            owner_user_id=ADMIN_ID,
+            media_type="document",
+            file_size_bytes=24,
+            storage_messages=(StorageMessageRef(child.storage_channel_id, 5024),),
+            category_id=child.id,
+            storage_channel_id=child.storage_channel_id,
+        )
+    )
+    await share_token(database, saved.id)
+    await share_token(database, survivor.id)
 
     await categories.delete("StorageA", delete_orphaned_requirements=True)
 
@@ -282,6 +294,11 @@ async def test_category_deletion_reassigns_items_and_removes_links(database: Dat
     assert reassigned.category_id == default.id
     assert reassigned.storage_channel_id == removed.storage_channel_id
     assert reassigned.storage_messages[0].chat_id == removed.storage_channel_id
+    assert (await ShareLinkRepository(database).list_for_item(saved.id))[0].revoked_at_ms is not None
+    assert (await ShareLinkRepository(database).list_for_item(survivor.id))[0].revoked_at_ms is None
+    retained_survivor = await ItemRepository(database).get(survivor.id)
+    assert retained_survivor is not None and retained_survivor.category_id == child.id
+    assert retained_survivor.storage_messages[0].chat_id == child.storage_channel_id
     async with database.connection() as connection:
         rows = await (await connection.execute(
             "SELECT COUNT(*) FROM category_links WHERE parent_category_id = ? OR child_category_id = ?",
@@ -289,6 +306,7 @@ async def test_category_deletion_reassigns_items_and_removes_links(database: Dat
         )).fetchone()
     assert int(rows[0]) == 0
     assert await categories.get(child.id) is not None
+    assert await categories.links_for(child.id) == ((), ())
 
 
 async def test_default_category_cannot_be_deleted(database: Database) -> None:
@@ -629,6 +647,9 @@ async def test_start_real_react_with_no_message_limit_still_requires_any_observe
 
 async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(database: Database) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
+    await BotSettingsRepository(database).set_real_check_failure_policy(
+        BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK
+    )
     await RequirementRepository(database).create(
         category_id=item.category_id,
         requirement_type="JOIN_CHAT",
@@ -646,6 +667,59 @@ async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(datab
 
     sleep.assert_awaited_once_with(2)
     bot.copy_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("requirement_type", "policy", "membership_result", "should_deliver"),
+    [
+        ("JOIN_CHAT", BotSettingsRepository.REAL_CHECK_FAIL_CLOSED, "error", False),
+        ("JOIN_CHAT", BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK, "error", True),
+        ("REACT", BotSettingsRepository.REAL_CHECK_FAIL_CLOSED, "error", False),
+        ("REACT", BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK, "error", True),
+        ("REACT", BotSettingsRepository.REAL_CHECK_FAIL_CLOSED, "member", False),
+        ("REACT", BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK, "member", True),
+    ],
+)
+async def test_real_check_unavailable_policy_controls_delivery_and_consumption(
+    database: Database,
+    requirement_type: str,
+    policy: str,
+    membership_result: str,
+    should_deliver: bool,
+) -> None:
+    item = await ItemRepository(database).create_stored_item(make_item())
+    if policy != BotSettingsRepository.REAL_CHECK_FAIL_CLOSED:
+        await BotSettingsRepository(database).set_real_check_failure_policy(policy)
+    await RequirementRepository(database).create(
+        category_id=item.category_id,
+        requirement_type=requirement_type,
+        target=REACT_CHANNEL,
+        is_fake=False,
+        wait_seconds=2,
+    )
+    token = await share_token(database, item.id)
+    update, message = start_update(token)
+    if membership_result == "error":
+        get_chat_member = AsyncMock(side_effect=RuntimeError("unavailable"))
+    else:
+        get_chat_member = AsyncMock(return_value=SimpleNamespace(status="member"))
+    bot = bot_stub(get_chat_member=get_chat_member)
+    context, bot = start_context(database, token, bot)
+
+    with patch("media_bot.services.rule_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
+        await start_command(update, context)
+
+    link = (await ShareLinkRepository(database).list_for_item(item.id))[0]
+    assert link.use_count == (1 if should_deliver else 0)
+    if should_deliver:
+        sleep.assert_awaited_once_with(2)
+        bot.copy_message.assert_awaited_once()
+    else:
+        sleep.assert_not_awaited()
+        bot.copy_message.assert_not_awaited()
+        assert "could not be verified" in message.reply_text.await_args.args[0].lower() or (
+            "unavailable" in message.reply_text.await_args.args[0].lower()
+        )
 
 
 async def test_fake_join_skips_telegram_membership_api(database: Database) -> None:

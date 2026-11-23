@@ -134,7 +134,7 @@ async def delete_category_command(update: Update, context: ContextTypes.DEFAULT_
         ]
     )
     await message.reply_text(
-        f"Confirm deletion of {category.name}. Items will be reassigned to Default.",
+        f"Confirm deletion of {category.name}. Items and stored media will be retained and reassigned to Default; all generated share links for those items will be revoked. Linked categories and their storage channels will remain.",
         reply_markup=keyboard,
     )
 
@@ -178,7 +178,7 @@ async def delete_category_callback(update: Update, context: ContextTypes.DEFAULT
     await query.answer("Category deleted.")
     if query.message is not None:
         await query.edit_message_text(
-            f"Category {category.name} deleted. Orphaned requirements "
+            f"Category {category.name} deleted. Items and stored media were retained and reassigned to Default; share links for those items were revoked. Linked categories were kept. Orphaned requirements "
             f"{'were deleted.' if choice == 'a' else 'were kept.'}"
         )
 

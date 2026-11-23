@@ -190,6 +190,12 @@ class CategoryRepository:
                 await connection.rollback()
                 raise RecordNotFound("Category was not found")
             await connection.execute(
+                """UPDATE share_links SET revoked_at_ms = MAX(?, created_at_ms)
+                   WHERE revoked_at_ms IS NULL
+                     AND item_id IN (SELECT id FROM items WHERE category_id = ?)""",
+                (_now_ms(), category.id),
+            )
+            await connection.execute(
                 "UPDATE items SET category_id = ? WHERE category_id = ?",
                 (default.id, category.id),
             )
@@ -394,6 +400,9 @@ class BotSettingsRepository:
     """Read and change durable key/value behavior flags."""
 
     COMMANDS_KEY = "ENABLE_USER_COMMANDS"
+    REAL_CHECK_FAILURE_POLICY_KEY = "REAL_CHECK_FAILURE_POLICY"
+    REAL_CHECK_FAIL_CLOSED = "fail_closed"
+    REAL_CHECK_WAIT_FALLBACK = "wait_fallback"
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -436,6 +445,42 @@ class BotSettingsRepository:
                 """INSERT INTO bot_settings (key, value) VALUES (?, ?)
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (self.COMMANDS_KEY, "true" if enabled else "false"),
+            )
+            await connection.commit()
+        return True
+
+    async def real_check_failure_policy(self) -> str:
+        """Return the durable real-check failure policy; absent/invalid values fail closed."""
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = ?",
+                (self.REAL_CHECK_FAILURE_POLICY_KEY,),
+            )
+            row = await cursor.fetchone()
+        value = self.REAL_CHECK_FAIL_CLOSED if row is None else str(row["value"])
+        if value not in {self.REAL_CHECK_FAIL_CLOSED, self.REAL_CHECK_WAIT_FALLBACK}:
+            return self.REAL_CHECK_FAIL_CLOSED
+        return value
+
+    async def set_real_check_failure_policy(self, policy: str) -> bool:
+        """Persist a supported real-check failure policy; return whether it changed."""
+        if policy not in {self.REAL_CHECK_FAIL_CLOSED, self.REAL_CHECK_WAIT_FALLBACK}:
+            raise InvalidRecord("policy must be fail_closed or wait_fallback")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = ?",
+                (self.REAL_CHECK_FAILURE_POLICY_KEY,),
+            )
+            row = await cursor.fetchone()
+            current = self.REAL_CHECK_FAIL_CLOSED if row is None else str(row["value"])
+            if current == policy:
+                await connection.commit()
+                return False
+            await connection.execute(
+                """INSERT INTO bot_settings (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (self.REAL_CHECK_FAILURE_POLICY_KEY, policy),
             )
             await connection.commit()
         return True

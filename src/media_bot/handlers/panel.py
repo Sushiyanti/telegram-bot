@@ -684,6 +684,10 @@ async def _dispatch_callback(
         await _set_lockdown(context, state, True, query=query)
     elif action == "unlock":
         await _set_lockdown(context, state, False, query=query)
+    elif action == "realpolicy_set":
+        await _set_real_check_policy(
+            context, state, _str_arg(args, 0), query=query
+        )
     elif action == "inputcancel":
         was_category_input = str(state.get("view", "")).startswith("input_category_")
         state.pop("category_draft_name", None)
@@ -863,7 +867,7 @@ async def _show_category_delete(
     await _edit_panel(
         context,
         state,
-        f"Delete {category.name}? Its items will move to Default. Parent/child links to this category will be removed, but linked categories themselves will remain. Choose whether to delete or keep requirements that become orphaned.",
+        f"Delete {category.name}? Its items will move to Default; the items and stored media will remain. All generated share links for those items will be revoked. Parent/child links to this category will be removed, but linked categories and their storage channels will remain. Choose whether to delete or keep requirements that become orphaned.",
         _markup(rows),
         query=query,
     )
@@ -896,7 +900,17 @@ async def _delete_category(
         f"{category_id}:orphaned={choice}",
         target_type="category",
     )
-    await _show_categories(context, state, int(state.get("page", 0)), query=query, notice=f"{category.name} deleted; items reassigned to Default.")
+    await _show_categories(
+        context,
+        state,
+        int(state.get("page", 0)),
+        query=query,
+        notice=(
+            f"{category.name} deleted; items and stored media were retained and "
+            "reassigned to Default. Share links for those items were revoked; "
+            "linked categories were kept."
+        ),
+    )
 
 
 async def _show_requirement_scopes(
@@ -1553,10 +1567,19 @@ async def _show_settings(
     settings_repo = BotSettingsRepository(_database(context))
     enabled = await settings_repo.user_commands_enabled()
     locked = not enabled
+    real_policy = await settings_repo.real_check_failure_policy()
     state.update({"view": "settings", "input": None})
     target_action = "unlock" if locked else "lock"
     markup = _markup([
         [_button(f"Lock Bot ({'ON' if locked else 'OFF'})", state, target_action)],
+        [_button(
+            f"Real-check errors: {'Deny' if real_policy == BotSettingsRepository.REAL_CHECK_FAIL_CLOSED else 'Wait fallback'}",
+            state,
+            "realpolicy_set",
+            BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK
+            if real_policy == BotSettingsRepository.REAL_CHECK_FAIL_CLOSED
+            else BotSettingsRepository.REAL_CHECK_FAIL_CLOSED,
+        )],
         [_button("Main Menu", state, "home"), _button("Close Menu", state, "close")],
     ])
     await _edit_panel(
@@ -1565,10 +1588,31 @@ async def _show_settings(
         f"Settings — Access Control\n"
         f"Regular-user command/upload lock: {'ON' if locked else 'OFF'}\n\n"
         "When ON, regular users can use only /start and cannot upload media. "
-        "Admins and approved Uploaders are unaffected.",
+        "Admins and approved Uploaders are unaffected.\n\n"
+        f"Real JOIN_CHAT/REACT check unavailable: "
+        f"{'deny without using a share link' if real_policy == BotSettingsRepository.REAL_CHECK_FAIL_CLOSED else 'use the rule’s configured wait'}.",
         markup,
         query=query,
     )
+
+
+async def _set_real_check_policy(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    policy: str,
+    *,
+    query: Any = None,
+) -> None:
+    changed = await BotSettingsRepository(_database(context)).set_real_check_failure_policy(policy)
+    if changed:
+        await _audit(
+            _database(context),
+            int(state["owner_user_id"]),
+            "real_check_failure_policy_changed",
+            policy,
+            target_type="bot_setting",
+        )
+    await _show_settings(context, state, query=query)
 
 
 async def _set_lockdown(

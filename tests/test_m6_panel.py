@@ -415,7 +415,9 @@ async def test_category_detail_link_and_delete_are_panel_managed(database: Datab
     confirm = await press(context, "catdelete", parent.id)
     confirm_text = confirm.edit_message_text.await_args.kwargs["text"]
     assert "items will move to Default" in confirm_text
-    assert "linked categories themselves will remain" in confirm_text
+    assert "stored media will remain" in confirm_text
+    assert "share links for those items will be revoked" in confirm_text
+    assert "linked categories and their storage channels will remain" in confirm_text
     assert "requirements that become orphaned" in confirm_text
     assert {"Delete orphaned requirements", "Keep orphaned requirements", "Cancel"} <= set(
         _keyboard_labels(confirm.edit_message_text.await_args.kwargs["reply_markup"])
@@ -806,6 +808,26 @@ async def test_settings_panel_explains_and_toggles_regular_user_lock(database: D
     assert "Admins and approved Uploaders are unaffected." in text
     assert "Lock Bot (OFF)" in _keyboard_labels(settings.edit_message_text.await_args.kwargs["reply_markup"])
     assert await panel_handlers.BotSettingsRepository(database).user_commands_enabled()
+    assert await panel_handlers.BotSettingsRepository(database).real_check_failure_policy() == (
+        panel_handlers.BotSettingsRepository.REAL_CHECK_FAIL_CLOSED
+    )
+    assert "deny without using a share link" in text
+    assert any("Real-check errors: Deny" in label for label in _keyboard_labels(
+        settings.edit_message_text.await_args.kwargs["reply_markup"]
+    ))
+
+    wait_policy = await press(
+        context,
+        "realpolicy_set",
+        panel_handlers.BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK,
+    )
+    assert await panel_handlers.BotSettingsRepository(database).real_check_failure_policy() == (
+        panel_handlers.BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK
+    )
+    assert "use the rule’s configured wait" in wait_policy.edit_message_text.await_args.kwargs["text"]
+    assert any("Real-check errors: Wait fallback" in label for label in _keyboard_labels(
+        wait_policy.edit_message_text.await_args.kwargs["reply_markup"]
+    ))
 
     locked = await press(context, "lock")
     assert not await panel_handlers.BotSettingsRepository(database).user_commands_enabled()

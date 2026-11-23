@@ -1,68 +1,51 @@
 # Telegram File-Sharing Bot — M6 Completion Handoff
 
-**Purpose:** Continue the M6 completion review from the pushed checkpoint below. This document is not a declaration that M6 or the entire bot is complete. Use the original user-authored requests as the specification; do not begin M7.
+**Purpose:** Continue M6 from the pushed checkpoint below. The checkpoint was intentionally saved **mid-milestone** as a resumable state; it is not a declaration that M6 is complete or that the code is bug-free. Unfinished behavior, bugs, regressions, or test failures may remain. Carefully inspect the repository, history, source, tests, and docs before changing anything. Do not begin M7.
 
-## Repository checkpoint
+## Repository and continuation state
 
-- Workspace: `/tmp/telegram-bot-review`
+- Repository: `/tmp/telegram-bot-review`
 - Branch: `main`
-- Pushed base for this continuation: `84eb314` (`Checkpoint M6 completion review`). This handoff describes the subsequent M6 changes in this continuation; consult `git log` and `git status` for the latest saved/pushed state.
-- Database schema remains version 6. No migration or dependency was added.
-- No live Telegram action was performed. This environment has no provisioned bot credentials or designated test channels/users.
+- Pushed base: `a7251094b686f62c13632fb70453c0a95947f2c6` (`Improve M6 prompt links and rule flow coverage`), still equal to `origin/main`.
+- The current worktree contains **uncommitted M6 changes**. Preserve and inspect them; do not reset or overwrite.
+- Schema remains version 6. The changes below use the existing `bot_settings` table; no migration or dependency was added.
+- No live Telegram action was performed; no designated test channels/users or authorized test credentials are present.
+- Latest validation: focused `tests/test_m5_rules.py tests/test_m6_panel.py` — **95 passed**; full `uv run --locked --group dev pytest -q` — **235 passed**; compileall passed; `git diff --check` passed. A temporary DB reported `PRAGMA user_version=6`; no `REAL_CHECK_FAILURE_POLICY` row is seeded, so the code default is fail-closed.
+- Earlier in this resumed sandbox, an M2 album-upload test failed in one full-suite run and a targeted rerun. Later full-suite runs passed; the cause was not established. This M6 change does not modify upload handling. Do not claim that the M6 work fixed that earlier observation.
 
-## Authoritative user-authored requests
+## User-confirmed decisions
 
-The primary source is `/home/ubuntu/upload/deepseek_data-2026-11-21.zip`, especially USER turns #69, #71, #73, #79, #85, #89, #91, and #93. The supplemental wizard requirements are in `/home/ubuntu/upload/pasted_content.txt`; the category-deletion request is in `/home/ubuntu/upload/pasted_content_2.txt`.
+These resolve the prior open product questions; do not ask the user again unless code inspection reveals a materially different ambiguity.
 
-- **USER #69:** The bot is for sharing requested files through generated links while promoting required channels/groups/actions. Regular users may be restricted to `/start`; admins and allowlisted staff should bypass that lock. Multiple storage categories are needed.
-- **USER #71:** Requirements may be scoped/inherited by category. The panel should be understandable, low-clutter, and single-message. Passing methods should be configurable, including real checks, waits, and prompt/link-style flows for channels/groups and bot-start/reaction requirements. REACT message and day bounds must be configurable and independently disableable. The user also stated that Fake-style behavior should not be exposed as such to recipients.
-- **USER #73:** Category deletion needs confirmation and a choice to keep or delete orphaned requirements.
-- **USER #79:** Non-real/“cheating” passing approaches should remain configurable.
-- **USER #85:** Allowlisted users are staff and bypass the regular-user lock; a broad Django-like permissions manager was not necessary then.
-- **USER #89/#91/#93:** The implementation was not to be called complete just because the milestone had previously been accepted; the unfinished work belongs to M6, not a new M7.
-- **USER #13:** Keep share links non-expiring by default while allowing optional per-link expiry. The data model/service support optional expiry, but `/share` currently exposes only the non-expiring default. Keep that UI gap outside M6 unless the user expands scope; do not change the default.
+1. Keep `/addrequirement` for backward compatibility. Zero rule-syntax typing applies inside the panel wizard only.
+2. Keep the M6 panel admin-only. A Django-like dynamic permission manager is a future idea, not required now.
+3. Make the Real JOIN_CHAT/REACT unavailable-check policy configurable by admins. Prefer and default to fail closed: deny before share-use consumption. Keep the configured-wait fallback as an option; it is not proof of a Real check.
+4. On confirmed category deletion, revoke share links for items assigned to that category while retaining media/items and storage messages, reassigning items to `Default`, removing graph edges to the deleted category, and preserving linked categories/shared storage channels. Keep the existing explicit choice to keep or delete orphaned requirements.
+5. Keep Settings suitable for future expansion. M6 baseline controls are the regular-user command/upload lock and Real-check failure policy; do not invent unrelated settings or a broad permission matrix.
 
-The export does not define a broader Settings/permissions matrix. Do not invent one. If additional controls are expected beyond the documented command/upload lock, ask for specifics. There is also a tension between #69's mention of allowlisted staff managing requirements and the admin-only panel request; do not expand uploader privileges without clarification.
+## Implemented in the current worktree
 
-## Work completed in this continuation
+### Real-check failure policy
 
-1. Added an end-to-end panel test for **Add Uploader**: selecting the uploader role, submitting a numeric ID, persisting the active grant, refreshing the uploader list in the same panel message, and ensuring no additional bot message is sent.
-2. Added a lockdown regression test for a **database-backed, non-environment admin**, exercising both command and media bypass while the regular-user lock is on.
-3. Implemented the user-requested optional **prompt/link path** using the existing `requirements.settings_json` field; no schema change. Public channel/group/user usernames from forwarded messages can prefill a Telegram URL. For private targets, an admin can paste an optional invite URL. Only HTTPS links on `t.me` or `telegram.me` are accepted.
-4. Fake JOIN_CHAT, REACT, and START_BOT rules now show a generic recipient-facing prompt and optional URL button, then pass immediately or after the configured wait. Real JOIN/REACT denials also show the configured link button when available. Link clicks are not monitored or treated as proof of membership, bot-start, or reaction. Recipient-facing wait text is neutral (“Please wait...”); it does not claim a check is happening. The admin wizard describes the Real versus prompt/wait behavior explicitly.
-5. Forwarded `MessageOriginChat` group targets are now accepted for channel/group rules as well as forwarded channels; public usernames can prefill the link.
-6. Matched the button choices to the supplemental specification: waits `0, 3, 5, 10, 30, 60`; REACT post bounds `0, 3, 5, 10`; age bounds `0, 7, 30`. Zero bounds disable those respective limits, not the reaction requirement.
-7. Corrected the handoff and decision log to cite USER #13 accurately, and updated the M5/M6 guides with link/prompt semantics and wait behavior.
+`BotSettingsRepository` stores `REAL_CHECK_FAILURE_POLICY` in the existing key/value table. An absent or invalid setting, or a setting-read error during check handling, resolves fail-closed. Admins can switch between `fail_closed` and `wait_fallback` from the Settings panel; changes are audited. Real JOIN_CHAT API errors and Real REACT API/admin/state lookup failures use the selected policy. A confirmed user denial (not a member/no qualifying reaction) remains a denial. With fail-closed, `RequirementEvaluator.verify` returns false before `start_command` calls `ShareLinkService.consume`, so the share use remains available. With `wait_fallback`, the rule's configured wait is applied and delivery may proceed, consuming the usual use. Recipient wording does not claim the wait proves verification.
 
-## Validation completed
+### Category deletion
 
-- `uv run --locked --group dev pytest -q` — **229 passed**.
-- `uv run --locked python -m compileall -q src tests` — passed.
-- `git diff --check` — passed.
-- Direct SQLite check — `PRAGMA user_version=6`.
-- Ruff is not configured in `pyproject.toml`; no Ruff check was run.
-- Automated Telegram calls are mocked. **No live Telegram testing** was performed.
+`CategoryRepository.delete` now revokes active `share_links` rows for items whose `category_id` is the category being removed, inside the same transaction as item reassignment and category/link deletion. It does not delete item/media rows or Telegram storage messages and does not delete a storage channel. Other linked categories survive, while graph edges attached to the deleted category are removed. Both panel and legacy-command confirmation/result text warn that links for the category's items will stop working and explain that media and linked categories remain. The orphaned-requirement choice remains explicit.
 
-## Preserved behavior and scope boundaries
+### Regression coverage and docs
 
-- M6 remains the scope; do not start M7.
-- Admin-panel navigation and input responses edit the same active panel message. An explicit `/admin` or `/panel` command intentionally opens a new panel; exceptional edit failure may send a replacement panel.
-- Rule syntax is not typed in the panel. Numeric IDs/forwarded messages, category names, and the optional Telegram URL are the accepted inputs.
-- Real `START_BOT` verification remains unsupported without a separate attestation bridge; only prompt/wait behavior is offered.
-- Real JOIN_CHAT and REACT API/admin failures retain the existing configured-wait fallback. A real JOIN denial does not consume the share-link use.
-- Real REACT can only use posts/reaction updates observed by the running bot; there is no historical backfill.
-- Category creation warns that the bot needs posting rights but does not verify them live.
-- Optional share-link expiry UI remains outside this continuation. `/share` keeps the existing unlimited/non-expiring default.
+- `tests/test_m5_rules.py` exercises fail-closed default and wait fallback for Real JOIN_CHAT and REACT unavailable/error paths, including a confirmed bot-non-admin REACT state; it checks delivery and durable share-use counts.
+- Category tests assert revoked links for removed-category items, unaffected links for another category sharing the same storage channel, retained/reassigned items and storage messages, and surviving linked categories.
+- `tests/test_m6_panel.py` covers Settings policy selection and category-delete warning text.
+- `docs/M6_ADMIN_PANEL.md`, `docs/M5_CATEGORIES_AND_REQUIREMENTS.md`, and `docs/decision-log.md` describe the implemented behavior.
 
-## Key files
+## Remaining boundaries / next steps
 
-- `src/media_bot/handlers/panel.py` — single-message panel, rule wizard, input validation, staff flows, and timeouts.
-- `src/media_bot/db/rules.py` — requirements/settings persistence and Telegram URL validation.
-- `src/media_bot/services/rule_engine.py` — real checks, neutral wait messaging, prompt/link buttons, and Fake wait/prompt behavior.
-- `src/media_bot/handlers/policy.py` — regular-user lockdown with admin/uploader bypass.
-- `tests/test_m6_panel.py`, `tests/test_m5_rules.py` — panel and mocked `/start <token>` acceptance coverage.
-- `docs/M6_ADMIN_PANEL.md`, `docs/M5_CATEGORIES_AND_REQUIREMENTS.md`, `docs/decision-log.md` — behavior and decision documentation.
-
-## Status / next step
-
-The listed automated checks pass, and the continuation closes the two identified test gaps and the prompt/link product-flow gap. **Do not declare M6 complete solely from this handoff or the test count.** Review the current Git status/history, preserve the checkpoint, obtain any needed live Telegram validation on the user's side, and wait for explicit user acceptance before treating M6 as complete. Do not start M7.
+- M6 is **not complete or live-accepted**. Tests mock Telegram calls; no live Telegram validation has been performed.
+- Recheck Git state and carefully inspect the complete uncommitted diff. Do not assume passing tests prove every panel action or product requirement is finished.
+- Review remaining M6 UX/security issues, including how the JOIN wizard distinguishes a confirmed non-admin from an unavailable lookup, and add only concrete missing tests.
+- Category creation still warns about posting rights without a live preflight check; do not test against production channels without authorization.
+- Large-file end-to-end guarantees remain unverified. Optional per-link expiry UI remains outside M6; preserve non-expiring links by default.
+- Re-run the full tests, compilation, diff check, and schema check after further edits. Report mocked/live evidence precisely.
+- Stop at M6 and wait for explicit user acceptance before declaring the milestone complete or starting later work.
