@@ -19,7 +19,7 @@ from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.admins import AdminRepository
 from media_bot.db.database import Database
-from media_bot.handlers.admin import delete_command, list_command
+from media_bot.handlers.admin import delete_command, list_command, stats_command
 from media_bot.handlers.categories import (
     add_category_command,
     add_requirement_command,
@@ -45,6 +45,7 @@ from media_bot.handlers.sharing import (
     start_command,
 )
 from media_bot.handlers.uploads import UploadHandler
+from media_bot.handlers.verify import verify_callback
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,9 @@ def build_application(settings: Settings) -> Application:
         CommandHandler("delete", admin_only(delete_command), filters=private_commands)
     )
     application.add_handler(
+        CommandHandler("stats", admin_only(stats_command), filters=private_commands)
+    )
+    application.add_handler(
         CommandHandler("addcategory", admin_only(add_category_command), filters=private_commands)
     )
     application.add_handler(
@@ -125,6 +129,9 @@ def build_application(settings: Settings) -> Application:
     )
     application.add_handler(
         CallbackQueryHandler(admin_panel_callback, pattern=r"^m6:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(verify_callback, pattern=r"^verify:")
     )
     application.add_handler(
         CallbackQueryHandler(delete_category_callback, pattern=r"^delcat:")

@@ -53,6 +53,9 @@ async def enforce_user_command_policy(
     message = update.effective_message
     if user is None or message is None:
         return
+    callback_query = getattr(update, "callback_query", None)
+    if callback_query is not None and str(getattr(callback_query, "data", "")).startswith("verify:"):
+        return
     bot_data = context.application.bot_data
     database = bot_data["database"]
     settings = bot_data["settings"]

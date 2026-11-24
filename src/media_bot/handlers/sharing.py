@@ -14,10 +14,22 @@ from media_bot.auth import can_upload_with_registry, is_admin
 from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
-from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    OfferEventRepository,
+    OfferRepository,
+    OfferRequirementRepository,
+    RequiredChatRepository,
+    ShareLinkRepository,
+    UploaderRepository,
+)
 from media_bot.db.rules import CategoryRepository
 from media_bot.media_transfer import TransferCapabilities
-from media_bot.services import ShareLinkService
+from media_bot.services import ShareLinkService, hash_share_token
+from media_bot.services.offer_delivery import deliver_offer
+from media_bot.services.offer_evaluator import OfferEvaluator
+from media_bot.services.offer_messaging import render_gate_message
+from media_bot.services.verify_callback import VerifyCallbackPayload
 from media_bot.services.rule_engine import RequirementEvaluator
 
 
@@ -59,14 +71,33 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not context.args:
         await message.reply_text("Welcome. Open a valid share link to receive a file.")
         return
+    token = context.args[0]
+    if not isinstance(token, str) or len(token) > 64 or any(character.isspace() for character in token):
+        await message.reply_text("This offer or share link is unavailable.")
+        return
     if not _private_chat(update):
         await message.reply_text("Open this share link in a private chat with the bot.")
         return
 
-    token = context.args[0]
     settings = _settings(context)
     database = _database(context)
     items = ItemRepository(database)
+    try:
+        offer = await OfferRepository(database).get_by_slug_hash(
+            hash_share_token(token), active_only=False
+        )
+        logger.debug("start_slug_resolved offer_found=%s", offer is not None)
+    except Exception as exc:
+        logger.exception("offer_lookup_failed (%s)", type(exc).__name__)
+        await message.reply_text("This offer or share link is temporarily unavailable.")
+        return
+    if offer is not None:
+        if not offer.is_enabled:
+            await message.reply_text("This offer is unavailable.")
+            return
+        await _start_offer(update, context, offer, items)
+        return
+
     links = ShareLinkService(
         ShareLinkRepository(database),
         items,
@@ -96,34 +127,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     ):
         await message.reply_text("Delivery is not verified for this file size.")
         return
-
-    if settings.required_channel_id is not None:
-        try:
-            membership = await context.bot.get_chat_member(
-                chat_id=settings.required_channel_id,
-                user_id=int(user.id),
-            )
-        except Exception as exc:
-            logger.warning("required_channel_check_failed (%s)", type(exc).__name__)
-            await message.reply_text(
-                "Membership could not be verified. Please contact the bot administrator."
-            )
-            return
-        status = str(getattr(membership, "status", "")).lower()
-        member = status in {"creator", "administrator", "member"}
-        if status == "restricted":
-            member = bool(getattr(membership, "is_member", False))
-        if not member:
-            channel = "@channel"
-            try:
-                chat = await context.bot.get_chat(settings.required_channel_id)
-                username = getattr(chat, "username", None)
-                if isinstance(username, str) and username:
-                    channel = f"@{username.lstrip('@')}"
-            except Exception as exc:
-                logger.warning("required_channel_name_lookup_failed (%s)", type(exc).__name__)
-            await message.reply_text(f"Join {channel} to access.")
-            return
 
     category_id = item.category_id
     if category_id is None:
@@ -167,6 +170,64 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await message.reply_text("Delivered.")
     await _audit(database, actor_id=int(user.id), action="share_delivery", target_id=str(consumed.id))
+
+
+async def _start_offer(update: Update, context: ContextTypes.DEFAULT_TYPE, offer: Any, items: ItemRepository) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    settings = _settings(context)
+    database = _database(context)
+    item = await items.get(offer.item_id)
+    if item is None or not item.storage_messages:
+        await message.reply_text("This shared item is unavailable.")
+        return
+    expected_storage_id = item.storage_channel_id
+    if expected_storage_id is None:
+        category = await CategoryRepository(database).get(item.category_id) if item.category_id else None
+        expected_storage_id = category.storage_channel_id if category and category.storage_channel_id is not None else settings.storage_channel_id
+    if any(reference.chat_id != expected_storage_id for reference in item.storage_messages):
+        await message.reply_text("This shared item is unavailable.")
+        return
+    if not TransferCapabilities(settings.verified_transfer_max_file_bytes).supports(item.file_size_bytes):
+        await message.reply_text("Delivery is not verified for this file size.")
+        return
+    try:
+        await OfferEventRepository(database).append(
+            offer.id, int(user.id), "start", at_ms=__import__("time").time_ns() // 1_000_000
+        )
+    except Exception as exc:
+        logger.warning("offer_start_event_failed (%s)", type(exc).__name__)
+    try:
+        result = await OfferEvaluator(
+            bot=context.bot,
+            offer_repo=OfferRepository(database),
+            requirement_repo=OfferRequirementRepository(database),
+            reaction_repo=__import__("media_bot.db.rules", fromlist=["ReactionRepository"]).ReactionRepository(database),
+            chat_repo=RequiredChatRepository(database),
+        ).evaluate(offer.id, int(user.id))
+    except Exception as exc:
+        logger.exception("offer_evaluation_failed (%s)", type(exc).__name__)
+        await message.reply_text("This offer is temporarily unavailable.")
+        return
+    if not result.all_passed:
+        text, markup = render_gate_message(offer, result)
+        _remember_verify_nonce(context, result.offer_id, result.user_id, markup)
+        await message.reply_text(text, reply_markup=markup)
+        return
+    outcome = await deliver_offer(context, offer, int(user.id))
+    await message.reply_text("Delivered." if outcome.ok else "Delivery failed. Please try again later.")
+
+
+def _remember_verify_nonce(context: ContextTypes.DEFAULT_TYPE, offer_id: int, user_id: int, markup: Any) -> None:
+    for row in getattr(markup, "inline_keyboard", ()):
+        for button in row:
+            payload = VerifyCallbackPayload.decode(getattr(button, "callback_data", ""))
+            if payload is not None and payload.offer_id == offer_id and payload.user_id == user_id:
+                store = getattr(context, "chat_data", None)
+                if not isinstance(store, dict):
+                    store = context.application.bot_data.setdefault("verify_nonces", {})
+                store[offer_id] = payload.nonce
+                return
 
 
 async def share_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

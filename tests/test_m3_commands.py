@@ -137,7 +137,7 @@ async def create_link(
 
 async def test_schema_v5_has_uploader_and_rate_limit_tables(database: Database) -> None:
     version, writable = await database.health_check()
-    assert version == 6
+    assert version == 8
     assert writable
     async with database.connection() as connection:
         rows = await (await connection.execute(
@@ -381,7 +381,7 @@ async def test_start_delivers_valid_link_to_member_with_protection(database: Dat
         settings_override={"required_channel_id": -100555},
     )
     await start_command(update, context)
-    context.bot.get_chat_member.assert_awaited_once_with(chat_id=-100555, user_id=USER_ID)
+    context.bot.get_chat_member.assert_not_awaited()
     context.bot.copy_message.assert_awaited_once_with(
         chat_id=USER_ID,
         from_chat_id=-1007123456789,
@@ -426,7 +426,7 @@ async def test_start_fails_closed_without_verified_transfer_limit(database: Data
 
 
 @pytest.mark.parametrize("status", ["left", "kicked"])
-async def test_start_refuses_nonmember_without_consuming_link(
+async def test_start_ignores_deprecated_global_channel_without_consuming_gate(
     database: Database, status: str
 ) -> None:
     item_id = await add_item(database)
@@ -441,15 +441,13 @@ async def test_start_refuses_nonmember_without_consuming_link(
         database, [token], settings_override={"required_channel_id": -100777}, bot=bot
     )
     await start_command(update, context)
-    bot.copy_message.assert_not_awaited()
-    update.effective_message.reply_text.assert_awaited_once_with(
-        "Join @sample_channel to access."
-    )
+    bot.copy_message.assert_awaited_once()
+    update.effective_message.reply_text.assert_awaited_once_with("Delivered.")
     link = (await ShareLinkRepository(database).list_for_item(item_id))[0]
-    assert link.use_count == 0
+    assert link.use_count == 1
 
 
-async def test_start_fails_closed_when_membership_check_errors(database: Database) -> None:
+async def test_start_ignores_deprecated_global_channel_check_errors(database: Database) -> None:
     item_id = await add_item(database)
     token = await create_link(database, item_id)
     bot = SimpleNamespace(
@@ -461,12 +459,10 @@ async def test_start_fails_closed_when_membership_check_errors(database: Databas
         database, [token], settings_override={"required_channel_id": -100777}, bot=bot
     )
     await start_command(update, context)
-    bot.copy_message.assert_not_awaited()
-    assert update.effective_message.reply_text.await_args.args[0] == (
-        "Membership could not be verified. Please contact the bot administrator."
-    )
+    bot.copy_message.assert_awaited_once()
+    assert update.effective_message.reply_text.await_args.args[0] == "Delivered."
     link = (await ShareLinkRepository(database).list_for_item(item_id))[0]
-    assert link.use_count == 0
+    assert link.use_count == 1
 
 
 async def test_start_rejects_expired_token(database: Database) -> None:
