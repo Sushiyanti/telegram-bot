@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import hmac
+import re
 from datetime import datetime, timezone
 from dataclasses import replace
 
@@ -14,6 +15,12 @@ from media_bot.db.models import (
     ItemFile,
     ItemSummary,
     MediaItem,
+    Offer,
+    OfferDelivery,
+    OfferEvent,
+    OfferRequiredChat,
+    OfferRequirement,
+    OfferStats,
     PendingUpload,
     PendingUploadMessage,
     RequiredChat,
@@ -687,6 +694,8 @@ class RequiredChatRepository:
         _validate_text(chat.title, "title", max_length=512)
         if chat.username is not None:
             _validate_text(chat.username, "username", max_length=64)
+        if chat.invite_url is not None:
+            _validate_text(chat.invite_url, "invite_url", max_length=512)
         if not isinstance(chat.is_enabled, bool):
             raise InvalidRecord("is_enabled must be a boolean")
         created = chat.created_at_ms if chat.created_at_ms is not None else _now_ms()
@@ -698,15 +707,16 @@ class RequiredChatRepository:
         async with self.database.connection() as connection:
             await connection.execute(
                 """INSERT INTO required_chats
-                   (chat_id, chat_type, title, username, is_enabled, created_at_ms, updated_at_ms)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (chat_id, chat_type, title, username, is_enabled, created_at_ms, updated_at_ms, invite_url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(chat_id) DO UPDATE SET
                      chat_type = excluded.chat_type,
                      title = excluded.title,
                      username = excluded.username,
                      is_enabled = excluded.is_enabled,
-                     updated_at_ms = MAX(required_chats.updated_at_ms, excluded.updated_at_ms)""",
-                (chat.chat_id, chat.chat_type, chat.title, chat.username, int(chat.is_enabled), created, updated),
+                     updated_at_ms = MAX(required_chats.updated_at_ms, excluded.updated_at_ms),
+                     invite_url = excluded.invite_url""",
+                (chat.chat_id, chat.chat_type, chat.title, chat.username, int(chat.is_enabled), created, updated, chat.invite_url),
             )
             cursor = await connection.execute(
                 "SELECT created_at_ms, updated_at_ms FROM required_chats WHERE chat_id = ?", (chat.chat_id,)
@@ -731,9 +741,334 @@ class RequiredChatRepository:
                 is_enabled=bool(row["is_enabled"]),
                 created_at_ms=int(row["created_at_ms"]),
                 updated_at_ms=int(row["updated_at_ms"]),
+                invite_url=row["invite_url"],
             )
             for row in rows
         )
+
+
+class OfferRepository:
+    """Persist reusable public offers addressed by hashed slugs."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def create(self, offer: Offer) -> Offer:
+        _require_positive_int(offer.item_id, "item_id")
+        _require_positive_int(offer.created_by_user_id, "created_by_user_id")
+        _validate_offer_hash(offer.slug_hash)
+        _validate_text(offer.title, "title", max_length=256)
+        if offer.slug_hint is not None:
+            _validate_text(offer.slug_hint, "slug_hint", max_length=128)
+        if offer.slug_plain is not None:
+            _validate_slug_plain(offer.slug_plain)
+        if offer.description is not None:
+            _validate_text(offer.description, "description", max_length=4096)
+        if not isinstance(offer.is_enabled, bool):
+            raise InvalidRecord("is_enabled must be a boolean")
+        _require_time(offer.created_at_ms, "created_at_ms")
+        _require_time(offer.updated_at_ms, "updated_at_ms")
+        if offer.updated_at_ms < offer.created_at_ms:
+            raise InvalidRecord("updated_at_ms must not precede created_at_ms")
+        try:
+            async with self.database.connection() as connection:
+                cursor = await connection.execute(
+                    """INSERT INTO offers
+                       (item_id, slug_hash, slug_plain, slug_hint, title, description, is_enabled,
+                        created_by_user_id, created_at_ms, updated_at_ms)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (offer.item_id, offer.slug_hash, offer.slug_plain, offer.slug_hint, offer.title,
+                     offer.description, int(offer.is_enabled), offer.created_by_user_id,
+                     offer.created_at_ms, offer.updated_at_ms),
+                )
+                offer_id = int(cursor.lastrowid)
+        except sqlite3.IntegrityError as exc:
+            raise InvalidRecord("Offer violates uniqueness or foreign-key constraints") from exc
+        return replace(offer, id=offer_id)
+
+    async def get_by_slug_hash(self, slug_hash: bytes, *, active_only: bool = True) -> Offer | None:
+        _validate_offer_hash(slug_hash)
+        query = "SELECT * FROM offers WHERE slug_hash = ?"
+        parameters: tuple[object, ...] = (slug_hash,)
+        if active_only:
+            query += " AND is_enabled = 1"
+        async with self.database.connection() as connection:
+            row = await (await connection.execute(query, parameters)).fetchone()
+        return None if row is None else _offer_from_row(row)
+
+    async def get_by_id(self, offer_id: int, *, active_only: bool = False) -> Offer | None:
+        _require_positive_int(offer_id, "offer_id")
+        query = "SELECT * FROM offers WHERE id = ?"
+        parameters: tuple[object, ...] = (offer_id,)
+        if active_only:
+            query += " AND is_enabled = 1"
+        async with self.database.connection() as connection:
+            row = await (await connection.execute(query, parameters)).fetchone()
+        return None if row is None else _offer_from_row(row)
+
+    async def list_active(self, *, item_id: int | None = None) -> tuple[Offer, ...]:
+        if item_id is not None:
+            _require_positive_int(item_id, "item_id")
+        async with self.database.connection() as connection:
+            if item_id is None:
+                cursor = await connection.execute(
+                    "SELECT * FROM offers WHERE is_enabled = 1 ORDER BY updated_at_ms DESC, id DESC"
+                )
+            else:
+                cursor = await connection.execute(
+                    "SELECT * FROM offers WHERE is_enabled = 1 AND item_id = ? ORDER BY updated_at_ms DESC, id DESC",
+                    (item_id,),
+                )
+            rows = await cursor.fetchall()
+        return tuple(_offer_from_row(row) for row in rows)
+
+    async def disable(self, offer_id: int, *, updated_at_ms: int) -> bool:
+        _require_positive_int(offer_id, "offer_id")
+        _require_time(updated_at_ms, "updated_at_ms")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "UPDATE offers SET is_enabled = 0, updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ? AND is_enabled = 1",
+                (updated_at_ms, offer_id),
+            )
+        return cursor.rowcount == 1
+
+    async def assign_item(self, offer_id: int, item_id: int, *, updated_at_ms: int) -> bool:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(item_id, "item_id")
+        _require_time(updated_at_ms, "updated_at_ms")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "UPDATE offers SET item_id = ?, updated_at_ms = MAX(updated_at_ms, ?) WHERE id = ?",
+                (item_id, updated_at_ms, offer_id),
+            )
+        return cursor.rowcount == 1
+
+
+class OfferRequirementRepository:
+    """Manage ordered channel and reusable-rule assignments for an offer."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def add_required_chat(self, offer_id: int, chat_id: int, *, sort_order: int = 0) -> OfferRequiredChat:
+        _require_positive_int(offer_id, "offer_id")
+        _require_nonzero_int(chat_id, "chat_id")
+        _require_order(sort_order)
+        try:
+            async with self.database.connection() as connection:
+                await connection.execute(
+                    """INSERT INTO offer_required_chats (offer_id, chat_id, sort_order)
+                       VALUES (?, ?, ?)""", (offer_id, chat_id, sort_order)
+                )
+        except sqlite3.IntegrityError as exc:
+            raise InvalidRecord("Offer or required chat does not exist, or the chat is already assigned") from exc
+        return OfferRequiredChat(offer_id, chat_id, sort_order, True)
+
+    async def remove_required_chat(self, offer_id: int, chat_id: int) -> bool:
+        _require_positive_int(offer_id, "offer_id")
+        _require_nonzero_int(chat_id, "chat_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM offer_required_chats WHERE offer_id = ? AND chat_id = ?",
+                (offer_id, chat_id),
+            )
+        return cursor.rowcount == 1
+
+    async def list_required_chats(self, offer_id: int, *, enabled_only: bool = True) -> tuple[OfferRequiredChat, ...]:
+        _require_positive_int(offer_id, "offer_id")
+        query = "SELECT * FROM offer_required_chats WHERE offer_id = ?"
+        if enabled_only:
+            query += " AND is_enabled = 1"
+        query += " ORDER BY sort_order, chat_id"
+        async with self.database.connection() as connection:
+            rows = await (await connection.execute(query, (offer_id,))).fetchall()
+        return tuple(_offer_required_chat_from_row(row) for row in rows)
+
+    async def add_requirement(self, offer_id: int, requirement_id: int, *, sort_order: int = 0) -> OfferRequirement:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(requirement_id, "requirement_id")
+        _require_order(sort_order)
+        try:
+            async with self.database.connection() as connection:
+                await connection.execute(
+                    """INSERT INTO offer_requirements (offer_id, requirement_id, sort_order)
+                       VALUES (?, ?, ?)""", (offer_id, requirement_id, sort_order)
+                )
+        except sqlite3.IntegrityError as exc:
+            raise InvalidRecord("Offer or requirement does not exist, or the requirement is already assigned") from exc
+        return OfferRequirement(offer_id, requirement_id, sort_order)
+
+    async def remove_requirement(self, offer_id: int, requirement_id: int) -> bool:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(requirement_id, "requirement_id")
+        async with self.database.connection() as connection:
+            cursor = await connection.execute(
+                "DELETE FROM offer_requirements WHERE offer_id = ? AND requirement_id = ?",
+                (offer_id, requirement_id),
+            )
+        return cursor.rowcount == 1
+
+    async def list_requirements(self, offer_id: int) -> tuple[OfferRequirement, ...]:
+        _require_positive_int(offer_id, "offer_id")
+        async with self.database.connection() as connection:
+            rows = await (await connection.execute(
+                "SELECT * FROM offer_requirements WHERE offer_id = ? ORDER BY sort_order, requirement_id",
+                (offer_id,),
+            )).fetchall()
+        return tuple(_offer_requirement_from_row(row) for row in rows)
+
+    async def get_requirement(self, requirement_id: int):
+        """Resolve an assigned requirement through the existing rule repository."""
+        from media_bot.db.rules import RequirementRepository
+
+        return await RequirementRepository(self.database).get(requirement_id)
+
+
+class OfferDeliveryRepository:
+    """Maintain idempotent per-user unlocks and repeat delivery counts."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def record_unlock(self, offer_id: int, user_id: int, *, at_ms: int) -> tuple[OfferDelivery, bool]:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(user_id, "user_id")
+        _require_time(at_ms, "at_ms")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                """INSERT INTO offer_deliveries
+                   (offer_id, user_id, first_unlocked_at_ms, last_delivered_at_ms, delivery_count)
+                   VALUES (?, ?, ?, ?, 0) ON CONFLICT(offer_id, user_id) DO NOTHING""",
+                (offer_id, user_id, at_ms, at_ms),
+            )
+            inserted = cursor.rowcount == 1
+            if inserted:
+                await connection.execute(
+                    """INSERT OR IGNORE INTO offer_events
+                       (offer_id, user_id, event_type, created_at_ms)
+                       VALUES (?, ?, 'unlock', ?)""", (offer_id, user_id, at_ms)
+                )
+            row = await (await connection.execute(
+                "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
+                (offer_id, user_id),
+            )).fetchone()
+            await connection.commit()
+        return _offer_delivery_from_row(row), inserted
+
+    async def record_delivery(self, offer_id: int, user_id: int, *, at_ms: int) -> OfferDelivery:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(user_id, "user_id")
+        _require_time(at_ms, "at_ms")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                """UPDATE offer_deliveries SET last_delivered_at_ms = ?, delivery_count = delivery_count + 1
+                   WHERE offer_id = ? AND user_id = ?""", (at_ms, offer_id, user_id)
+            )
+            if cursor.rowcount != 1:
+                await connection.rollback()
+                raise RecordNotFound("Offer unlock does not exist for this user")
+            await connection.execute(
+                """INSERT INTO offer_events (offer_id, user_id, event_type, created_at_ms)
+                   VALUES (?, ?, 'delivery', ?)""", (offer_id, user_id, at_ms)
+            )
+            row = await (await connection.execute(
+                "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
+                (offer_id, user_id),
+            )).fetchone()
+            await connection.commit()
+        return _offer_delivery_from_row(row)
+
+
+class OfferEventRepository:
+    """Append offer events and aggregate conversion statistics."""
+
+    _EVENT_TYPES = {"start", "verification", "unlock", "delivery", "delivery_failure"}
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    async def append(
+        self,
+        offer_id: int,
+        user_id: int,
+        event_type: str,
+        *,
+        at_ms: int,
+        verification_result: str | None = None,
+        metadata_json: str = "{}",
+    ) -> OfferEvent | None:
+        _require_positive_int(offer_id, "offer_id")
+        _require_positive_int(user_id, "user_id")
+        _require_time(at_ms, "at_ms")
+        if event_type not in self._EVENT_TYPES:
+            raise InvalidRecord("Unsupported offer event type")
+        if not isinstance(metadata_json, str) or len(metadata_json) > 4096:
+            raise InvalidRecord("metadata_json must be text no longer than 4096 characters")
+        async with self.database.connection() as connection:
+            if event_type == "unlock":
+                cursor = await connection.execute(
+                    """INSERT OR IGNORE INTO offer_events
+                       (offer_id, user_id, event_type, verification_result, created_at_ms, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (offer_id, user_id, event_type, verification_result, at_ms, metadata_json),
+                )
+            else:
+                cursor = await connection.execute(
+                    """INSERT INTO offer_events
+                       (offer_id, user_id, event_type, verification_result, created_at_ms, metadata_json)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (offer_id, user_id, event_type, verification_result, at_ms, metadata_json),
+                )
+            if cursor.rowcount != 1:
+                return None
+            event_id = int(cursor.lastrowid)
+            row = await (await connection.execute(
+                "SELECT * FROM offer_events WHERE id = ?", (event_id,)
+            )).fetchone()
+        return _offer_event_from_row(row)
+
+    async def stats(self, offer_id: int | None = None) -> tuple[OfferStats, ...]:
+        if offer_id is not None:
+            _require_positive_int(offer_id, "offer_id")
+        async with self.database.connection() as connection:
+            if offer_id is None:
+                cursor = await connection.execute(
+                    """SELECT offers.id AS offer_id,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'start' THEN 1 ELSE 0 END), 0) AS starts,
+                       COUNT(DISTINCT CASE WHEN events.event_type = 'start' THEN events.user_id END) AS distinct_start_users,
+                       COUNT(DISTINCT CASE WHEN events.event_type = 'unlock' THEN events.user_id END) AS distinct_unlock_users,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'unlock' THEN 1 ELSE 0 END), 0) AS unlocks,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'delivery' THEN 1 ELSE 0 END), 0) AS deliveries
+                       FROM offers LEFT JOIN offer_events AS events ON events.offer_id = offers.id
+                       GROUP BY offers.id ORDER BY offers.id"""
+                )
+            else:
+                cursor = await connection.execute(
+                    """SELECT offers.id AS offer_id,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'start' THEN 1 ELSE 0 END), 0) AS starts,
+                       COUNT(DISTINCT CASE WHEN events.event_type = 'start' THEN events.user_id END) AS distinct_start_users,
+                       COUNT(DISTINCT CASE WHEN events.event_type = 'unlock' THEN events.user_id END) AS distinct_unlock_users,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'unlock' THEN 1 ELSE 0 END), 0) AS unlocks,
+                       COALESCE(SUM(CASE WHEN events.event_type = 'delivery' THEN 1 ELSE 0 END), 0) AS deliveries
+                       FROM offers LEFT JOIN offer_events AS events ON events.offer_id = offers.id
+                       WHERE offers.id = ? GROUP BY offers.id ORDER BY offers.id""",
+                    (offer_id,),
+                )
+            rows = await cursor.fetchall()
+        result: list[OfferStats] = []
+        for row in rows:
+            starts = int(row["starts"])
+            distinct_starts = int(row["distinct_start_users"])
+            distinct_unlocks = int(row["distinct_unlock_users"])
+            result.append(OfferStats(
+                offer_id=int(row["offer_id"]), starts=starts,
+                distinct_start_users=distinct_starts, unlocks=int(row["unlocks"]),
+                distinct_unlock_users=distinct_unlocks, deliveries=int(row["deliveries"]),
+                conversion_rate_percent=(distinct_unlocks / distinct_starts * 100.0) if distinct_starts else 0.0,
+            ))
+        return tuple(result)
 
 
 class PendingUploadRepository:
@@ -1026,6 +1361,54 @@ def _share_link_from_row(row: sqlite3.Row) -> ShareLink:
         revoked_at_ms=None if row["revoked_at_ms"] is None else int(row["revoked_at_ms"]),
         use_count=int(row["use_count"]),
         max_uses=None if row["max_uses"] is None else int(row["max_uses"]),
+    )
+
+
+def _validate_offer_hash(value: bytes) -> None:
+    if not isinstance(value, bytes) or len(value) != 32:
+        raise InvalidRecord("slug_hash must be a 32-byte SHA-256 digest")
+
+
+def _require_order(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise InvalidRecord("sort_order must be a non-negative integer")
+
+
+def _validate_slug_plain(value: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is None:
+        raise InvalidRecord("slug_plain must be 1-64 base64url characters")
+
+
+def _offer_from_row(row: sqlite3.Row) -> Offer:
+    return Offer(
+        id=int(row["id"]), item_id=int(row["item_id"]), slug_hash=bytes(row["slug_hash"]),
+        slug_hint=row["slug_hint"], title=str(row["title"]), description=row["description"],
+        is_enabled=bool(row["is_enabled"]), created_by_user_id=int(row["created_by_user_id"]),
+        created_at_ms=int(row["created_at_ms"]), updated_at_ms=int(row["updated_at_ms"]),
+        slug_plain=row["slug_plain"] if "slug_plain" in row.keys() else None,
+    )
+
+
+def _offer_required_chat_from_row(row: sqlite3.Row) -> OfferRequiredChat:
+    return OfferRequiredChat(int(row["offer_id"]), int(row["chat_id"]), int(row["sort_order"]), bool(row["is_enabled"]))
+
+
+def _offer_requirement_from_row(row: sqlite3.Row) -> OfferRequirement:
+    return OfferRequirement(int(row["offer_id"]), int(row["requirement_id"]), int(row["sort_order"]))
+
+
+def _offer_delivery_from_row(row: sqlite3.Row) -> OfferDelivery:
+    return OfferDelivery(
+        int(row["offer_id"]), int(row["user_id"]), int(row["first_unlocked_at_ms"]),
+        int(row["last_delivered_at_ms"]), int(row["delivery_count"]),
+    )
+
+
+def _offer_event_from_row(row: sqlite3.Row) -> OfferEvent:
+    return OfferEvent(
+        id=int(row["id"]), offer_id=int(row["offer_id"]), user_id=int(row["user_id"]),
+        event_type=str(row["event_type"]), verification_result=row["verification_result"],
+        created_at_ms=int(row["created_at_ms"]), metadata_json=str(row["metadata_json"]),
     )
 
 

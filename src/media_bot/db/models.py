@@ -86,7 +86,7 @@ class CreatedShareLink:
 
 @dataclass(frozen=True, slots=True)
 class RequiredChat:
-    """A channel or group whose membership is required by sharing policy."""
+    """A channel or group in the permanent required-chat registry."""
 
     chat_id: int
     chat_type: str
@@ -95,6 +95,7 @@ class RequiredChat:
     is_enabled: bool = True
     created_at_ms: int | None = None
     updated_at_ms: int | None = None
+    invite_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,3 +133,76 @@ class PendingUpload:
     pipeline: str = "legacy"
     category_id: int | None = None
     category_selection_pending: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class Offer:
+    """A reusable public offer addressed by an opaque slug hash."""
+
+    id: int
+    item_id: int
+    slug_hash: bytes
+    slug_hint: str | None
+    title: str
+    description: str | None
+    is_enabled: bool
+    created_by_user_id: int
+    created_at_ms: int
+    updated_at_ms: int
+    slug_plain: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OfferRequiredChat:
+    """An ordered channel/group membership gate assigned to an offer."""
+
+    offer_id: int
+    chat_id: int
+    sort_order: int
+    is_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class OfferRequirement:
+    """An ordered reusable requirement definition assigned to an offer."""
+
+    offer_id: int
+    requirement_id: int
+    sort_order: int
+
+
+@dataclass(frozen=True, slots=True)
+class OfferDelivery:
+    """Per-user unlock and repeat-delivery ledger for an offer."""
+
+    offer_id: int
+    user_id: int
+    first_unlocked_at_ms: int
+    last_delivered_at_ms: int
+    delivery_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class OfferEvent:
+    """Append-only offer conversion event."""
+
+    id: int
+    offer_id: int
+    user_id: int
+    event_type: str
+    verification_result: str | None
+    created_at_ms: int
+    metadata_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class OfferStats:
+    """Aggregated per-offer conversion metrics."""
+
+    offer_id: int
+    starts: int
+    distinct_start_users: int
+    unlocks: int
+    distinct_unlock_users: int
+    deliveries: int
+    conversion_rate_percent: float

@@ -74,3 +74,19 @@ class MediaTransferBackend(Protocol):
     ) -> None:
         """Copy stored messages into a recipient chat."""
         ...
+
+
+async def send_one(
+    bot: object,
+    reference: StorageMessageRef,
+    recipient_chat_id: int,
+    *,
+    protect_content: bool,
+) -> object:
+    """Copy one stored message through the mockable Telegram transfer seam."""
+    return await bot.copy_message(
+        chat_id=recipient_chat_id,
+        from_chat_id=reference.chat_id,
+        message_id=reference.message_id,
+        protect_content=protect_content,
+    )
