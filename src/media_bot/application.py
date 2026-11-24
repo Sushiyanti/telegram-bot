@@ -54,10 +54,15 @@ logger = logging.getLogger(__name__)
 async def error_handler(
     update: object, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Log only the error type, not message contents or credential-bearing URLs."""
-    del update
-    error_type = type(context.error).__name__ if context.error is not None else "Unknown"
-    logger.error("Unhandled Telegram update failure (%s)", error_type)
+    """Log update failures with traceback while avoiding sensitive payloads."""
+    update_id = getattr(update, "update_id", None)
+    if context.error is not None:
+        try:
+            raise context.error
+        except BaseException:
+            logger.exception("Unhandled Telegram update failure (update_id=%s)", update_id)
+    else:
+        logger.exception("Unhandled Telegram update failure (update_id=%s)", update_id)
 
 
 def build_application(settings: Settings) -> Application:

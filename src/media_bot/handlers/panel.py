@@ -246,7 +246,10 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     action, *args = parts[2:]
     try:
         await _dispatch_callback(action, args, query, context, state)
-    except (InvalidRecord, RecordNotFound, ValueError) as exc:
+    except ValueError:
+        logger.debug("malformed_admin_panel_callback data=%r", data)
+        await _edit_panel(context, state, "That button is out of date; reopen the menu", _back_home(state), query=query)
+    except (InvalidRecord, RecordNotFound) as exc:
         await _edit_panel(context, state, f"Could not complete that action: {exc}", _back_home(state), query=query)
     except Exception:
         logger.exception("admin_panel_action_failed")
@@ -373,7 +376,12 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except InvalidRecord:
                 await _edit_panel(context, state, "Send a valid Telegram invite URL, or press Skip.", _markup([[_button("Skip", state, "cmpchat_skipurl")], [_button("Cancel", state, "cmpchatcancel")]]))
                 raise ApplicationHandlerStop
-            await _finish_campaign_chat(context, state)
+            try:
+                await _finish_campaign_chat(context, state)
+            except (InvalidRecord, RecordNotFound) as exc:
+                logger.exception("campaign_chat_wizard_failed")
+                _clear_pending_flow(state)
+                await _edit_panel(context, state, f"That action could not be completed. {exc}. Reply /panel to return.", _back_home(state))
         else:
             raise InvalidRecord("channel setup step is invalid")
         raise ApplicationHandlerStop
@@ -1855,10 +1863,10 @@ def _int_arg(args: list[str], index: int, default: int | None = None) -> int:
             return default
         raise ValueError("Missing numeric callback argument")
     raw = args[index]
-    if _NUMERIC_ID.fullmatch(raw) is None:
+    if _SIGNED_NUMERIC_ID.fullmatch(raw) is None:
         raise ValueError("Invalid numeric callback argument")
     parsed = int(raw)
-    if parsed < 0 or parsed > _MAX_ID:
+    if parsed < -_MAX_ID or parsed > _MAX_ID:
         raise ValueError("Numeric callback argument is out of range")
     return parsed
 
