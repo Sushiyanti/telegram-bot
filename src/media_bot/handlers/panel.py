@@ -6,6 +6,7 @@ import math
 import re
 import secrets
 import time
+import hashlib
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -16,13 +17,24 @@ from media_bot.config import Settings
 from media_bot.db.admins import AdminRepository
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
-from media_bot.db.repositories import InvalidRecord, RecordNotFound, UploaderRepository
+from media_bot.db.repositories import (
+    InvalidRecord,
+    ItemRepository,
+    OfferEventRepository,
+    OfferRepository,
+    OfferRequirementRepository,
+    RequiredChatRepository,
+    RecordNotFound,
+    UploaderRepository,
+)
 from media_bot.db.rules import (
     BotSettingsRepository,
     CategoryRepository,
     RequirementRepository,
     validate_telegram_link,
 )
+from media_bot.db.models import Offer
+from media_bot.services import hash_share_token
 
 logger = logging.getLogger(__name__)
 _PANEL_KEY = "m6_admin_panel"
@@ -120,8 +132,9 @@ def _markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 
 def _home_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
     return _markup([
-        [_button("📁 Categories", state, "categories", 0), _button("📜 Requirements", state, "requirements", 0)],
+        [_button("📣 Campaigns", state, "campaigns", 0), _button("📜 Requirements", state, "requirements", 0)],
         [_button("👥 Staff", state, "staff"), _button("⚙️ Settings", state, "settings")],
+        [_button("📊 Stats", state, "stats")],
         [_button("Close Menu", state, "close")],
     ])
 
@@ -326,6 +339,42 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "The bot needs administrator permission to post there.",
             _input_markup(state),
         )
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "campaign_title":
+        title = getattr(message, "text", None)
+        title = title.strip() if isinstance(title, str) else ""
+        if not title or len(title) > 256:
+            await _edit_panel(context, state, "Send a non-empty offer title (maximum 256 characters).", _input_markup(state))
+            raise ApplicationHandlerStop
+        wizard = state.get("wizard")
+        if not isinstance(wizard, dict):
+            _clear_pending_flow(state)
+            await _edit_panel(context, state, "Admin Control Panel", _home_markup(state))
+            raise ApplicationHandlerStop
+        wizard["title"] = title
+        state["input"] = None
+        await _edit_panel(
+            context, state,
+            f"Create campaign for item {wizard['item_id']} titled “{title}”?\n\nYou can add channels and requirements after creation.",
+            _markup([[_button("Create offer", state, "cmpconfirm")], [_button("Cancel", state, "campaigns", 0)]]),
+        )
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "campaign_edit":
+        wizard = state.get("wizard")
+        value = getattr(message, "text", None)
+        value = value.strip() if isinstance(value, str) else ""
+        max_length = 256 if isinstance(wizard, dict) and wizard.get("field") == "title" else 4096
+        if not isinstance(wizard, dict) or not value or len(value) > max_length:
+            await _edit_panel(context, state, "Please send valid non-empty text within the allowed length.", _input_markup(state))
+            raise ApplicationHandlerStop
+        column = "title" if wizard.get("field") == "title" else "description"
+        async with _database(context).connection() as connection:
+            await connection.execute(f"UPDATE offers SET {column} = ?, updated_at_ms = ? WHERE id = ?", (value, int(time.time() * 1000), int(wizard["offer_id"])))
+        offer_id = int(wizard["offer_id"])
+        _clear_pending_flow(state)
+        await _show_campaign(context, state, offer_id, notice="Campaign updated.")
         raise ApplicationHandlerStop
 
     if pending.get("kind") == "category_storage":
@@ -581,6 +630,44 @@ async def _dispatch_callback(
         await _edit_panel(context, state, "Admin Control Panel", _home_markup(state), query=query)
     elif action == "categories":
         await _show_categories(context, state, _int_arg(args, 0, 0), query=query)
+    elif action == "campaigns":
+        await _show_campaigns(context, state, _int_arg(args, 0, 0), query=query)
+    elif action == "cmppage":
+        await _show_campaigns(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpcreate":
+        await _start_campaign_create(context, state, query=query)
+    elif action == "cmpitem":
+        await _select_campaign_item(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpconfirm":
+        await _create_campaign(context, state, query=query)
+    elif action == "cmpedit_title":
+        await _start_campaign_edit(context, state, _int_arg(args, 0), "title", query=query)
+    elif action == "cmpedit_desc":
+        await _start_campaign_edit(context, state, _int_arg(args, 0), "description", query=query)
+    elif action == "cmp":
+        await _show_campaign(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpenable":
+        await _toggle_campaign(context, state, _int_arg(args, 0), True, query=query)
+    elif action == "cmpdisable":
+        await _toggle_campaign(context, state, _int_arg(args, 0), False, query=query)
+    elif action == "cmpdelete":
+        await _toggle_campaign(context, state, _int_arg(args, 0), False, query=query)
+    elif action == "cmpaddchat":
+        await _show_campaign_chat_picker(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpchat":
+        await _add_campaign_chat(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
+    elif action == "cmrc":
+        await _remove_campaign_chat(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
+    elif action == "cmpaddreq":
+        await _show_campaign_requirement_picker(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpreq":
+        await _add_campaign_requirement(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
+    elif action == "cmrr":
+        await _remove_campaign_requirement(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
+    elif action == "cmpstats":
+        await _show_campaign_stats(context, state, _int_arg(args, 0), query=query)
+    elif action == "stats":
+        await _show_panel_stats(context, state, query=query)
     elif action == "catpage":
         await _show_categories(context, state, _int_arg(args, 0), query=query)
     elif action == "catadd":
@@ -1743,3 +1830,113 @@ def _scope_from_arg(args: list[str], index: int) -> int | None:
     if parsed <= 0 or parsed > _MAX_ID:
         raise ValueError("Invalid requirement scope")
     return parsed
+
+
+async def _all_offers(database: Database) -> tuple[Offer, ...]:
+    async with database.connection() as connection:
+        rows = await (await connection.execute("SELECT * FROM offers ORDER BY updated_at_ms DESC, id DESC")).fetchall()
+    return tuple(__import__("media_bot.db.repositories", fromlist=["_offer_from_row"])._offer_from_row(row) for row in rows)
+
+
+async def _show_campaigns(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], page: int = 0, *, query: Any = None, notice: str | None = None) -> None:
+    offers = await _all_offers(_database(context)); page = max(0, page); start = page * 5
+    repo = OfferRequirementRepository(_database(context)); rows = []
+    for offer in offers[start:start + 5]:
+        chats = await repo.list_required_chats(offer.id); reqs = await repo.list_requirements(offer.id)
+        rows.append([_button(f"{offer.title[:24]} · item {offer.item_id} · {'ON' if offer.is_enabled else 'OFF'} · C{len(chats)} R{len(reqs)}", state, "cmp", offer.id)])
+    if not rows: rows.append([_button("No campaigns yet", state, "cmpcreate")])
+    nav = []
+    if page: nav.append(_button("‹", state, "cmppage", page - 1))
+    if start + 5 < len(offers): nav.append(_button("›", state, "cmppage", page + 1))
+    if nav: rows.append(nav)
+    rows.extend([[_button("＋ Create campaign", state, "cmpcreate")], [_button("‹ Home", state, "home")]])
+    state.update(view="campaigns", page=page)
+    await _edit_panel(context, state, (notice + "\n\n" if notice else "") + "Campaigns\nSelect an offer to manage it.", _markup(rows), query=query)
+
+
+async def _start_campaign_create(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    items = await ItemRepository(_database(context)).list_recent(10)
+    rows = [[_button(f"Item {item.id} · {item.media_type}", state, "cmpitem", item.id)] for item in items]
+    rows.append([_button("‹ Campaigns", state, "campaigns", 0)])
+    state["view"] = "campaign_create_item"
+    await _edit_panel(context, state, "Create campaign\nChoose the media item to unlock.", _markup(rows), query=query)
+
+
+async def _select_campaign_item(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], item_id: int, *, query: Any = None) -> None:
+    state["wizard"] = {"item_id": item_id}; state["input"] = {"kind": "campaign_title"}; state["view"] = "campaign_title"; _touch_pending_flow(state)
+    await _edit_panel(context, state, f"Item {item_id} selected. Send the campaign title as your next message.", _input_markup(state), query=query)
+
+
+async def _create_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    wizard = state.get("wizard"); actor = int(state["owner_user_id"])
+    if not isinstance(wizard, dict) or "item_id" not in wizard or not wizard.get("title"): raise InvalidRecord("campaign creation is incomplete")
+    slug = secrets.token_urlsafe(24); now = int(time.time() * 1000)
+    offer = await OfferRepository(_database(context)).create(Offer(0, int(wizard["item_id"]), hash_share_token(slug), None, str(wizard["title"]), None, True, actor, now, now, slug))
+    await _audit(_database(context), actor, "offer_created", str(offer.id), target_type="offer"); _clear_pending_flow(state)
+    await _show_campaign(context, state, offer.id, query=query, notice="Campaign created. Share this deep link:")
+
+
+async def _show_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None, notice: str | None = None) -> None:
+    offer = await OfferRepository(_database(context)).get_by_id(offer_id)
+    if offer is None: raise RecordNotFound("campaign does not exist")
+    repo = OfferRequirementRepository(_database(context)); chats = await repo.list_required_chats(offer_id); reqs = await repo.list_requirements(offer_id)
+    username = getattr(_settings(context), "bot_username", "YourBot"); link = f"https://t.me/{username}?start={offer.slug_plain}" if offer.slug_plain else "Link not retrievable — backfilled from legacy token; existing circulating link continues to work"
+    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{link}"
+    rows = [[_button("Disable" if offer.is_enabled else "Enable", state, "cmpdisable" if offer.is_enabled else "cmpenable", offer_id)], [_button("Edit title", state, "cmpedit_title", offer_id), _button("Edit description", state, "cmpedit_desc", offer_id)], [_button("Add channel", state, "cmpaddchat", offer_id)], [_button("Add requirement", state, "cmpaddreq", offer_id)]]
+    rows.extend([[_button(f"Remove channel {chat.chat_id}", state, "cmrc", offer_id, chat.chat_id)] for chat in chats])
+    rows.extend([[_button(f"Remove requirement {req.requirement_id}", state, "cmrr", offer_id, req.requirement_id)] for req in reqs])
+    rows.extend([[_button("View stats", state, "cmpstats", offer_id)], [_button("‹ Campaigns", state, "campaigns", 0)]])
+    state["view"] = "campaign"; await _edit_panel(context, state, text, _markup(rows), query=query)
+
+
+async def _toggle_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, enabled: bool, *, query: Any = None) -> None:
+    if await OfferRepository(_database(context)).get_by_id(offer_id) is None: raise RecordNotFound("campaign does not exist")
+    async with _database(context).connection() as connection:
+        await connection.execute("UPDATE offers SET is_enabled = ?, updated_at_ms = ? WHERE id = ?", (int(enabled), int(time.time() * 1000), offer_id))
+    await _show_campaign(context, state, offer_id, query=query, notice="Campaign updated.")
+
+
+async def _show_campaign_chat_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
+    chats = await RequiredChatRepository(_database(context)).list_enabled(); rows = [[_button((chat.username or chat.title)[:30], state, "cmpchat", offer_id, chat.chat_id)] for chat in chats]
+    rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose a required channel or group.", _markup(rows), query=query)
+
+
+async def _add_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
+    await OfferRequirementRepository(_database(context)).add_required_chat(offer_id, chat_id); await _show_campaign(context, state, offer_id, query=query, notice="Channel requirement added.")
+
+
+async def _remove_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
+    await OfferRequirementRepository(_database(context)).remove_required_chat(offer_id, chat_id); await _show_campaign(context, state, offer_id, query=query, notice="Channel requirement removed.")
+
+
+async def _show_campaign_requirement_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
+    requirements = await RequirementRepository(_database(context)).list(); rows = [[_button(f"{item.type} · {item.id}", state, "cmpreq", offer_id, item.id)] for item in requirements]
+    rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose an existing requirement (including REACT).", _markup(rows), query=query)
+
+
+async def _add_campaign_requirement(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, requirement_id: int, *, query: Any = None) -> None:
+    await OfferRequirementRepository(_database(context)).add_requirement(offer_id, requirement_id); await _show_campaign(context, state, offer_id, query=query, notice="Requirement added.")
+
+
+async def _remove_campaign_requirement(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, requirement_id: int, *, query: Any = None) -> None:
+    await OfferRequirementRepository(_database(context)).remove_requirement(offer_id, requirement_id); await _show_campaign(context, state, offer_id, query=query, notice="Requirement removed.")
+
+
+async def _show_campaign_stats(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
+    values = await OfferEventRepository(_database(context)).stats(offer_id); item = values[0] if values else None
+    text = "Campaign stats\nNo events yet." if item is None else f"Campaign stats\nStarts: {item.starts} ({item.distinct_start_users} users)\nUnlocks: {item.unlocks} ({item.distinct_unlock_users} users)\nDeliveries: {item.deliveries}\nConversion: {item.conversion_rate_percent:.1f}%"
+    await _edit_panel(context, state, text, _markup([[_button("‹ Back", state, "cmp", offer_id)]]), query=query)
+
+
+async def _show_panel_stats(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    values = await OfferEventRepository(_database(context)).stats(); starts = sum(x.starts for x in values); unlocks = sum(x.unlocks for x in values); deliveries = sum(x.deliveries for x in values)
+    await _edit_panel(context, state, f"Stats\nStarts: {starts}\nSuccessful unlocks: {unlocks}\nDeliveries: {deliveries}\nConversion: {(unlocks / starts * 100 if starts else 0):.1f}%", _markup([[_button("‹ Home", state, "home")]]), query=query)
+
+
+async def _start_campaign_edit(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, field: str, *, query: Any = None) -> None:
+    if field not in {"title", "description"}:
+        raise InvalidRecord("unsupported campaign field")
+    state["wizard"] = {"offer_id": offer_id, "field": field}
+    state["input"] = {"kind": "campaign_edit"}
+    _touch_pending_flow(state)
+    await _edit_panel(context, state, f"Send the new campaign {field}.", _input_markup(state), query=query)

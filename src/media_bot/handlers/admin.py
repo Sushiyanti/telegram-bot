@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from media_bot.config import Settings
 from media_bot.db.database import Database
 from media_bot.db.repositories import ItemRepository
+from media_bot.db.repositories import OfferEventRepository, OfferRepository
 
 
 logger = logging.getLogger(__name__)
@@ -122,3 +123,46 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text(
             f"Item {item_id} deleted; removed {deleted} storage message(s)."
         )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bounded marketing-funnel conversion statistics without secret identifiers."""
+    message = update.effective_message
+    if message is None:
+        return
+    offer_id: int | None = None
+    if context.args:
+        if len(context.args) != 1 or _INTEGER.fullmatch(context.args[0]) is None:
+            await message.reply_text("Usage: /stats [offer_id]")
+            return
+        offer_id = int(context.args[0])
+        if offer_id <= 0:
+            await message.reply_text("Usage: /stats [offer_id]")
+            return
+    days = 30
+    cutoff = int(datetime.now(tz=timezone.utc).timestamp() * 1000) - days * 86_400_000
+    database = _database(context)
+    async with database.connection() as connection:
+        offer_filter = " AND offers.id = ?" if offer_id is not None else ""
+        parameters: tuple[object, ...] = (cutoff,) if offer_id is None else (cutoff, offer_id)
+        rows = await (await connection.execute(
+            """SELECT offers.id, offers.title,
+                SUM(CASE WHEN e.event_type='start' THEN 1 ELSE 0 END) starts,
+                COUNT(DISTINCT CASE WHEN e.event_type='start' THEN e.user_id END) start_users,
+                SUM(CASE WHEN e.event_type='unlock' THEN 1 ELSE 0 END) unlocks,
+                COUNT(DISTINCT CASE WHEN e.event_type='unlock' THEN e.user_id END) unlock_users,
+                SUM(CASE WHEN e.event_type='delivery' THEN 1 ELSE 0 END) deliveries,
+                SUM(CASE WHEN e.event_type='delivery_failure' THEN 1 ELSE 0 END) failures
+              FROM offers LEFT JOIN offer_events e ON e.offer_id=offers.id AND e.created_at_ms >= ?
+              WHERE 1 = 1""" + offer_filter + """
+              GROUP BY offers.id ORDER BY unlocks DESC, starts DESC, offers.id DESC""", parameters
+        )).fetchall()
+    total = [sum(int(row[key] or 0) for row in rows) for key in ("starts", "unlocks", "deliveries", "failures")]
+    scope = "aggregate" if offer_id is None else f"offer {offer_id}"
+    lines = [f"Marketing stats ({scope}, last {days} days)", f"Starts: {total[0]} · Unlocks: {total[1]} · Deliveries: {total[2]} · Failures: {total[3]}", f"Conversion: {(total[1] / total[0] * 100 if total[0] else 0):.1f}%"]
+    if rows:
+        lines.append("Top offers:")
+        for row in rows[:5]:
+            starts = int(row["starts"] or 0); unlocks = int(row["unlocks"] or 0)
+            lines.append(f"• {str(row['title'])[:40]} — {starts} starts, {unlocks} unlocks, {(unlocks / starts * 100 if starts else 0):.1f}%")
+    await message.reply_text("\n".join(lines))
