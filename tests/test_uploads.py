@@ -400,7 +400,9 @@ async def test_album_debounce_uses_one_copy_messages_call_and_persists_one_item(
         await handler.handle_message(update, make_context(bot))
 
     bot.copy_messages.assert_not_awaited()
-    await asyncio.sleep(0.06)
+    settle_tasks = tuple(handler._album_tasks.values())
+    assert settle_tasks
+    await asyncio.gather(*settle_tasks)
 
     bot.copy_message.assert_not_awaited()
     bot.copy_messages.assert_awaited_once_with(

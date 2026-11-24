@@ -230,7 +230,10 @@ async def test_t5_start_offer_gate_api_error_fails_closed(database: Database) ->
         rows = await (await connection.execute(
             "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id", (offer.id,)
         )).fetchall()
-    assert [row["event_type"] for row in rows] == ["start"]
+    event_types = [row["event_type"] for row in rows]
+    assert event_types == ["start"]
+    assert "unlock" not in event_types
+    assert "delivery" not in event_types
 
 
 @pytest.mark.asyncio
@@ -277,4 +280,7 @@ async def test_t5_verify_callback_gate_api_error_fails_closed(database: Database
         rows = await (await connection.execute(
             "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id", (offer.id,)
         )).fetchall()
-    assert [row["event_type"] for row in rows] == ["start"]
+    event_types = [row["event_type"] for row in rows]
+    assert event_types == ["start"]
+    assert "unlock" not in event_types
+    assert "delivery" not in event_types
