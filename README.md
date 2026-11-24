@@ -1,10 +1,10 @@
-# Telegram Private Media Storage Bot
+# Telegram Advertise-to-Unlock Bot
 
 A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance; M5 adds category-specific storage and dynamic access requirements; M6 adds database-backed admin roles and an inline admin panel. M6 was accepted on 2026-11-23 based on mocked validation; live Telegram behavior remains unverified. The [M6 completion handoff](docs/M6_COMPLETION_HANDOFF.md) records the acceptance boundary, and [M7 plan](docs/M7_PLAN.md) scopes isolated transfer-readiness work.
 
 ## Runtime and dependencies
 
-The project targets **CPython 3.15**. Python 3.15 is the current stable release line, and `python-telegram-bot` 22.8 declares Python 3.15 support. The repository pins the runtime to Python 3.15 for repeatable development. [Python's support table](https://devguide.python.org/versions/) [PTB on PyPI](https://pypi.org/project/python-telegram-bot/)
+The project targets **CPython 3.12** (`>=3.12,<3.13`), currently pinned to 3.12.3 for repeatable deployment. [Python's support table](https://devguide.python.org/versions/) [PTB on PyPI](https://pypi.org/project/python-telegram-bot/)
 
 PTB 22.8 is the selected stable Telegram framework. It supports asynchronous polling and includes the message-copy, chat-member lookup, and invite-link methods planned for later milestones. Its PyPI metadata lists native Bot API support through version 10.0; the project will use only the established methods needed by this bot, not newer optional API features. [PTB Bot API method reference](https://docs.python-telegram-bot.org/en/v22.8/telegram.bot.html) [PTB package metadata](https://pypi.org/project/python-telegram-bot/)
 
@@ -12,14 +12,14 @@ Runtime dependencies are managed in `pyproject.toml` and the complete dependency
 
 ## Local setup
 
-Install [uv](https://docs.astral.sh/uv/) and Python 3.15. From the repository root:
+Install [uv](https://docs.astral.sh/uv/) and CPython 3.12.3. From the repository root:
 
 ```sh
 uv sync --locked --group dev
 cp .env.example .env
 ```
 
-Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). The effective upload allowlist includes admins, active database uploader grants, and any supplied `UPLOADER_IDS`; `UPLOADER_MODE=all` remains the explicit open-upload override. Set optional `UPLOADER_REDEEM_CODE` to enable `/redeem <code>`, and optional `REQUIRED_CHANNEL_ID` to require channel membership before delivery. `VERIFIED_TRANSFER_MAX_FILE_BYTES` is an additional safety setting: leave it unset until recipient `copyMessage` support has been verified end to end; without it, share creation and delivery fail closed. `DEFAULT_PROTECT_CONTENT` applies to recipient-facing copies; storage copies continue to pass `protect_content=False`.
+Edit `.env` and replace the placeholders. Set `BOT_TOKEN` to a BotFather token, `STORAGE_CHANNEL_ID` to the numeric ID of the private storage channel, and `ADMIN_IDS` to comma-separated numeric Telegram user IDs. `DB_PATH` defaults to `./data/bot.db`; `LOG_LEVEL` defaults to `INFO`; `ENV` defaults to `dev`; and `MAX_RELAY_FILE_BYTES` defaults to `2147483648` (2 GiB). The effective upload allowlist includes admins, active database uploader grants, and any supplied `UPLOADER_IDS`; `UPLOADER_MODE=all` remains the explicit open-upload override. Set optional `UPLOADER_REDEEM_CODE` to enable `/redeem <code>`. `VERIFIED_TRANSFER_MAX_FILE_BYTES` is an additional safety setting: leave it unset until recipient `copyMessage` support has been verified end to end; without it, share creation and delivery fail closed. `DEFAULT_PROTECT_CONTENT` applies to recipient-facing copies; storage copies continue to pass `protect_content=False`.
 
 The bot can be started with either `uv run --locked --group dev python -m app` or `uv run --locked --group dev python -m media_bot`. Both entry points validate settings and initialize the database before polling. Missing or malformed settings produce a readable error that lists each invalid key. The token is never read from a tracked file; if a token is disclosed, revoke it through BotFather and replace it.
 
@@ -37,7 +37,11 @@ An accepted upload creates one item record, its storage-message references, and 
 
 `/redeem <code>` verifies the optional uploader code and grants a database-backed uploader record. Attempts are limited to one per 30 seconds per user; successes and failures are audited without recording the supplied code. `/adduser <user_id>` and `/revoke <user_id>` are admin-only; `/revoke` refuses targets in `ADMIN_IDS`. `/share <item_id>` is limited to admins and uploaders; non-admin uploaders may share only items they own, while admins may share any item. The command returns a `t.me` deep link; only the SHA-256 token digest is stored. Links retain the previously accepted non-expiring default and support optional persisted use limits at the repository/service layer.
 
-Opening `/start <token>` checks token validity, expiry, revocation, remaining uses, item availability, and (when configured) `getChatMember` status before atomically consuming one use. Delivery loops through the ordered storage message references and calls Telegram `copyMessage`; albums are delivered as successive messages. Non-members are refused with a join instruction. Failed membership checks fail closed and do not consume a use; if membership cannot be checked, the recipient is directed to contact the administrator. If Telegram reports that a source storage message is missing, the bot replies `This file is no longer available` and removes the item and its dependent metadata from the database. The bot does not download or re-upload media.
+Opening `/start <token>` checks token validity, expiry, revocation, remaining uses, item availability, and offer-level requirements before atomically consuming one use. Delivery loops through the ordered storage message references and calls Telegram `copyMessage`; albums are delivered as successive messages. If Telegram reports that a source storage message is missing, the bot replies `This file is no longer available` and removes the item and its dependent metadata from the database. The bot does not download or re-upload media.
+
+### Migration from `REQUIRED_CHANNEL_ID`
+
+`REQUIRED_CHANNEL_ID` is deprecated and is no longer a global delivery gate. Configure channel, group, and reaction requirements on each Campaign/Offer in the admin panel. If the old variable remains set, startup logs one warning and ignores it. For a one-time compatibility import, set `LEGACY_CHANNEL_IMPORT_ENABLED=true`; startup then imports the channel into active offers and records a durable marker so the import is idempotent. The default is `false`.
 
 ## M4 admin management and resilience
 

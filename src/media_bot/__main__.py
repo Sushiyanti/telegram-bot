@@ -10,7 +10,11 @@ from media_bot.application import build_application
 from media_bot.config import ConfigurationError, Settings
 from media_bot.db.database import Database, DatabaseError
 from media_bot.logging_config import configure_logging
-from media_bot.startup import StartupPrerequisiteError, prepare_state_directory
+from media_bot.startup import (
+    StartupPrerequisiteError,
+    prepare_state_directory,
+    run_legacy_required_channel_import,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,13 @@ def main() -> None:
         loop.run_until_complete(
             Database(settings.db_path).initialize(
                 storage_channel_id=settings.storage_channel_id
+            )
+        )
+        loop.run_until_complete(
+            run_legacy_required_channel_import(
+                Database(settings.db_path),
+                settings.required_channel_id,
+                enabled=settings.legacy_channel_import_enabled,
             )
         )
     except DatabaseError as exc:

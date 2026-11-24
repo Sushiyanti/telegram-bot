@@ -35,6 +35,8 @@ def render_gate_message(offer: Any, result: OfferEvaluationResult) -> tuple[str,
 
     if result.has_misconfigured_gate:
         lines.extend(["", "This offer is misconfigured, please contact the admin."])
+    if result.has_unavailable_gate:
+        lines.extend(["", "This requirement is currently unavailable. Please try again later."])
 
     nonce = secrets.token_urlsafe(8)
     verify_data = VerifyCallbackPayload.encode(

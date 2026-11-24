@@ -37,7 +37,9 @@ class Settings:
     uploader_mode: str = "admin"
     uploader_ids: tuple[int, ...] = ()
     uploader_redeem_code: str | None = None
+    # Deprecated compatibility setting. Offer-level requirements are authoritative.
     required_channel_id: int | None = None
+    legacy_channel_import_enabled: bool = False
     verified_transfer_max_file_bytes: int | None = None
 
     @classmethod
@@ -81,6 +83,10 @@ class Settings:
         required_channel_id = _parse_optional_channel_id(
             source.get("REQUIRED_CHANNEL_ID", ""), errors
         )
+        raw_legacy_import = source.get("LEGACY_CHANNEL_IMPORT_ENABLED", "false").strip().lower()
+        if raw_legacy_import not in {"true", "false"}:
+            errors.append("LEGACY_CHANNEL_IMPORT_ENABLED must be true or false")
+        legacy_channel_import_enabled = raw_legacy_import == "true"
         verified_transfer_max_file_bytes = _parse_optional_nonnegative_int(
             source.get("VERIFIED_TRANSFER_MAX_FILE_BYTES", ""),
             "VERIFIED_TRANSFER_MAX_FILE_BYTES",
@@ -129,6 +135,7 @@ class Settings:
             uploader_ids=uploader_ids,
             uploader_redeem_code=uploader_redeem_code,
             required_channel_id=required_channel_id,
+            legacy_channel_import_enabled=legacy_channel_import_enabled,
             verified_transfer_max_file_bytes=verified_transfer_max_file_bytes,
         )
 
