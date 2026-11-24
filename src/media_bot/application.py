@@ -72,6 +72,15 @@ def build_application(settings: Settings) -> Application:
 
     async def post_init(application: Application) -> None:
         await AdminRepository(database).seed_configured(settings.admin_ids)
+        try:
+            me = await application.bot.get_me()
+            username = getattr(me, "username", None)
+            if not isinstance(username, str) or not username.strip() or username.casefold() in {"yourbot", "your_bot", "bot_username"}:
+                logger.warning("bot_username_not_configured; campaign deep links will omit the bot username")
+            else:
+                application.bot_data["bot_username"] = username.strip().lstrip("@")
+        except Exception:
+            logger.exception("bot_identity_lookup_failed")
         await upload_handler.recover(application)
 
     application = (

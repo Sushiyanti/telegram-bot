@@ -324,6 +324,13 @@ class RequirementRepository:
             rows = await cursor.fetchall()
         return tuple(_requirement_from_row(row) for row in rows)
 
+    async def list_all(self) -> tuple[Requirement, ...]:
+        """List every registered requirement for offer-level assignment."""
+        async with self.database.connection() as connection:
+            cursor = await connection.execute("SELECT * FROM requirements ORDER BY id")
+            rows = await cursor.fetchall()
+        return tuple(_requirement_from_row(row) for row in rows)
+
     async def scopes_for(self, requirement_id: int) -> tuple[str, ...]:
         """Return direct scopes using a requirement, including the Global scope."""
         _positive_id(requirement_id, "requirement_id")

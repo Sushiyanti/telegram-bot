@@ -33,7 +33,7 @@ from media_bot.db.rules import (
     RequirementRepository,
     validate_telegram_link,
 )
-from media_bot.db.models import Offer
+from media_bot.db.models import Offer, RequiredChat
 from media_bot.services import hash_share_token
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,16 @@ def _database(context: ContextTypes.DEFAULT_TYPE) -> Database:
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
     return context.application.bot_data["settings"]
+
+
+def _panel_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    value = context.application.bot_data.get("bot_username")
+    if not isinstance(value, str):
+        return None
+    username = value.strip().lstrip("@")
+    if not username or username.casefold() in {"yourbot", "your_bot", "bot_username"}:
+        return None
+    return username
 
 
 def _panel(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
@@ -238,8 +248,8 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await _dispatch_callback(action, args, query, context, state)
     except (InvalidRecord, RecordNotFound, ValueError) as exc:
         await _edit_panel(context, state, f"Could not complete that action: {exc}", _back_home(state), query=query)
-    except Exception as exc:
-        logger.error("admin_panel_action_failed (%s)", type(exc).__name__)
+    except Exception:
+        logger.exception("admin_panel_action_failed")
         await _edit_panel(
             context,
             state,
@@ -339,6 +349,33 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "The bot needs administrator permission to post there.",
             _input_markup(state),
         )
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "campaign_chat":
+        wizard = state.get("wizard")
+        value = getattr(message, "text", None)
+        value = value.strip() if isinstance(value, str) else ""
+        if not isinstance(wizard, dict) or not value:
+            await _edit_panel(context, state, "Please send a non-empty value.", _input_markup(state))
+            raise ApplicationHandlerStop
+        step = wizard.get("chat_step")
+        if step == "identifier":
+            wizard["identifier"] = _chat_identifier(value)
+            wizard["chat_step"] = "display_name"
+            await _show_campaign_chat_name(context, state)
+        elif step == "display_name":
+            wizard["display_name"] = value
+            wizard["chat_step"] = "invite_url"
+            await _show_campaign_chat_invite(context, state)
+        elif step == "invite_url":
+            try:
+                wizard["invite_url"] = validate_telegram_link(value)
+            except InvalidRecord:
+                await _edit_panel(context, state, "Send a valid Telegram invite URL, or press Skip.", _markup([[_button("Skip", state, "cmpchat_skipurl")], [_button("Cancel", state, "cmpchatcancel")]]))
+                raise ApplicationHandlerStop
+            await _finish_campaign_chat(context, state)
+        else:
+            raise InvalidRecord("channel setup step is invalid")
         raise ApplicationHandlerStop
 
     if pending.get("kind") == "campaign_title":
@@ -654,6 +691,17 @@ async def _dispatch_callback(
         await _toggle_campaign(context, state, _int_arg(args, 0), False, query=query)
     elif action == "cmpaddchat":
         await _show_campaign_chat_picker(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpnewchat":
+        await _start_campaign_chat_input(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpchat_skipname":
+        await _campaign_chat_skip_name(context, state, query=query)
+    elif action == "cmpchat_skipurl":
+        await _campaign_chat_skip_url(context, state, query=query)
+    elif action == "cmpchatcancel":
+        wizard = state.get("wizard")
+        if not isinstance(wizard, dict):
+            raise InvalidRecord("channel setup is incomplete")
+        await _show_campaign(context, state, int(wizard["offer_id"]), query=query)
     elif action == "cmpchat":
         await _add_campaign_chat(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
     elif action == "cmrc":
@@ -1092,7 +1140,8 @@ async def _start_requirement_input(
 
 
 def _input_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
-    action = "rule_cancel" if isinstance(state.get("wizard"), dict) else "inputcancel"
+    wizard = state.get("wizard")
+    action = "cmpchatcancel" if isinstance(wizard, dict) and wizard.get("chat_step") else "rule_cancel" if isinstance(wizard, dict) else "inputcancel"
     return _markup([[_button("Cancel", state, action)]])
 
 
@@ -1880,8 +1929,12 @@ async def _show_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, An
     offer = await OfferRepository(_database(context)).get_by_id(offer_id)
     if offer is None: raise RecordNotFound("campaign does not exist")
     repo = OfferRequirementRepository(_database(context)); chats = await repo.list_required_chats(offer_id); reqs = await repo.list_requirements(offer_id)
-    username = getattr(_settings(context), "bot_username", "YourBot"); link = f"https://t.me/{username}?start={offer.slug_plain}" if offer.slug_plain else "Link not retrievable — backfilled from legacy token; existing circulating link continues to work"
-    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{link}"
+    username = _panel_bot_username(context)
+    link = (f"https://t.me/{username}?start={offer.slug_plain}" if username and offer.slug_plain
+            else "(bot username not configured)" if offer.slug_plain
+            else "Link not retrievable — backfilled from legacy token; existing circulating link continues to work")
+    warning = "\n⚠ This offer has no requirements — files will be delivered freely to anyone who opens the link." if offer.is_enabled and not chats and not reqs else ""
+    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{link}{warning}"
     rows = [[_button("Disable" if offer.is_enabled else "Enable", state, "cmpdisable" if offer.is_enabled else "cmpenable", offer_id)], [_button("Edit title", state, "cmpedit_title", offer_id), _button("Edit description", state, "cmpedit_desc", offer_id)], [_button("Add channel", state, "cmpaddchat", offer_id)], [_button("Add requirement", state, "cmpaddreq", offer_id)]]
     rows.extend([[_button(f"Remove channel {chat.chat_id}", state, "cmrc", offer_id, chat.chat_id)] for chat in chats])
     rows.extend([[_button(f"Remove requirement {req.requirement_id}", state, "cmrr", offer_id, req.requirement_id)] for req in reqs])
@@ -1898,7 +1951,70 @@ async def _toggle_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, 
 
 async def _show_campaign_chat_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
     chats = await RequiredChatRepository(_database(context)).list_enabled(); rows = [[_button((chat.username or chat.title)[:30], state, "cmpchat", offer_id, chat.chat_id)] for chat in chats]
+    rows.append([_button("＋ Add new channel", state, "cmpnewchat", offer_id)])
     rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose a required channel or group.", _markup(rows), query=query)
+
+
+async def _start_campaign_chat_input(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
+    state["wizard"] = {"offer_id": offer_id, "chat_step": "identifier"}
+    state["input"] = {"kind": "campaign_chat"}
+    state["view"] = "campaign_chat_identifier"
+    _touch_pending_flow(state)
+    await _edit_panel(context, state, "Send the channel @username, t.me link, or -100... id.", _input_markup(state), query=query)
+
+
+async def _show_campaign_chat_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
+    await _edit_panel(context, state, "Send a display name (or press Skip to use the username).", _markup([[_button("Skip", state, "cmpchat_skipname")], [_button("Cancel", state, "cmpchatcancel")]]))
+
+
+async def _show_campaign_chat_invite(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
+    await _edit_panel(context, state, "Send the invite URL (t.me/+... or t.me/... ), or Skip to derive from username.", _markup([[_button("Skip", state, "cmpchat_skipurl")], [_button("Cancel", state, "cmpchatcancel")]]))
+
+
+async def _campaign_chat_skip_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    wizard = state.get("wizard")
+    if not isinstance(wizard, dict):
+        raise InvalidRecord("channel setup is incomplete")
+    wizard["chat_step"] = "invite_url"
+    await _show_campaign_chat_invite(context, state)
+
+
+async def _campaign_chat_skip_url(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    await _finish_campaign_chat(context, state, query=query)
+
+
+def _chat_identifier(value: str) -> str:
+    value = value.strip()
+    match = re.fullmatch(r"(?:https?://)?t\.me/([A-Za-z0-9_]+)(?:/.*)?", value, re.IGNORECASE)
+    if match:
+        return "@" + match.group(1)
+    return value if value.startswith("@") or value.startswith("-") else "@" + value
+
+
+async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    wizard = state.get("wizard")
+    if not isinstance(wizard, dict):
+        raise InvalidRecord("channel setup is incomplete")
+    try:
+        chat = await context.bot.get_chat(str(wizard["identifier"]))
+    except Exception:
+        await _edit_panel(context, state, "Bot cannot access that channel — is it public or is the bot an admin there?", _input_markup(state), query=query)
+        return
+    chat_type = str(getattr(chat, "type", "channel"))
+    if chat_type not in {"channel", "group", "supergroup"}:
+        raise InvalidRecord("The identifier must resolve to a channel or group")
+    username = getattr(chat, "username", None)
+    username = str(username).lstrip("@").strip() if username else None
+    invite_url = wizard.get("invite_url") or (f"https://t.me/{username}" if username else None)
+    if not invite_url:
+        await _edit_panel(context, state, "An invite URL is required when Telegram does not provide a public username.", _input_markup(state), query=query)
+        return
+    title = str(wizard.get("display_name") or username or getattr(chat, "title", "Required channel"))
+    await RequiredChatRepository(_database(context)).upsert(RequiredChat(chat_id=int(chat.id), chat_type=chat_type, title=title, username=username, invite_url=invite_url))
+    await OfferRequirementRepository(_database(context)).add_required_chat(int(wizard["offer_id"]), int(chat.id))
+    offer_id = int(wizard["offer_id"])
+    _clear_pending_flow(state)
+    await _show_campaign(context, state, offer_id, query=query, notice="Channel requirement added.")
 
 
 async def _add_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
@@ -1910,8 +2026,10 @@ async def _remove_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
 
 
 async def _show_campaign_requirement_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
-    requirements = await RequirementRepository(_database(context)).list(); rows = [[_button(f"{item.type} · {item.id}", state, "cmpreq", offer_id, item.id)] for item in requirements]
-    rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose an existing requirement (including REACT).", _markup(rows), query=query)
+    requirements = tuple(item for item in await RequirementRepository(_database(context)).list_all() if item.type == "REACT")
+    rows = [[_button(f"{item.type} · {item.id}", state, "cmpreq", offer_id, item.id)] for item in requirements]
+    text = "Choose an existing requirement (including REACT)." if requirements else "No REACT requirements defined yet. Use /addreq on the admin channel to create one, then return here."
+    rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, text, _markup(rows), query=query)
 
 
 async def _add_campaign_requirement(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, requirement_id: int, *, query: Any = None) -> None:
