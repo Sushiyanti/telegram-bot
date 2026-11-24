@@ -25,6 +25,13 @@ from media_bot.services.verify_callback import VerifyCallbackPayload
 logger = logging.getLogger(__name__)
 
 
+async def _answer_callback(query: Any, *args: Any, **kwargs: Any) -> None:
+    try:
+        await query.answer(*args, **kwargs)
+    except Exception:
+        logger.debug("callback_answer_failed (continuing)", exc_info=True)
+
+
 def _nonce_store(context: ContextTypes.DEFAULT_TYPE) -> dict[int, str]:
     store = getattr(context, "chat_data", None)
     if isinstance(store, dict):
@@ -56,30 +63,30 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
+    await _answer_callback(query)
     payload = VerifyCallbackPayload.decode(getattr(query, "data", None))
     if payload is None:
-        await query.answer("Invalid or expired button")
+        await _answer_callback(query, "Invalid or expired button")
         return
     user = getattr(query, "from_user", None)
     if user is None or payload.user_id != int(user.id):
-        await query.answer("This button is not for you")
+        await _answer_callback(query, "This button is not for you")
         return
     if _nonce_store(context).get(payload.offer_id) != payload.nonce:
-        await query.answer("Expired, please resend /start")
+        await _answer_callback(query, "Expired, please resend /start")
         return
 
     database = context.application.bot_data["database"]
     offer = await OfferRepository(database).get_by_id(payload.offer_id, active_only=False)
     if offer is None or not offer.is_enabled:
-        await query.answer("Offer unavailable")
+        await _answer_callback(query, "Offer unavailable")
         await _edit_or_reply(query, "This offer is unavailable.")
         return
     try:
         result = await _evaluator(context).evaluate(offer.id, payload.user_id)
     except Exception as exc:
         logger.exception("verify_offer_evaluation_failed (%s)", type(exc).__name__)
-        await query.answer("Offer unavailable")
+        await _answer_callback(query, "Offer unavailable")
         await _edit_or_reply(query, "This offer is temporarily unavailable.")
         return
     if not result.all_passed:

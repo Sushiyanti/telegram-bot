@@ -16,6 +16,7 @@ from media_bot.db.repositories import ItemRepository, OfferRepository, OfferRequ
 from media_bot.handlers import panel
 from media_bot.media_transfer import StorageMessageRef
 from media_bot.services.core import hash_share_token
+from media_bot.db.rules import RequirementRepository
 
 OWNER = 9001
 STORAGE = -1001234567890
@@ -185,3 +186,109 @@ async def test_pb4_get_chat_failure_has_access_error_and_no_partial_row(database
     context = context_for(database, state, query_bot)
     await run_message_handler(message_update("https://t.me/missing"), context)
     assert await RequiredChatRepository(database).list_enabled() == ()
+
+
+@pytest.mark.asyncio
+async def test_d1_duplicate_required_chat_returns_false_without_duplicate(database: Database) -> None:
+    offer = await make_offer(database, "d1")
+    cid = -1001234567890
+    await RequiredChatRepository(database).upsert(RequiredChat(cid, "channel", "One", "one", True, 1, 1, "https://t.me/one"))
+    repo = OfferRequirementRepository(database)
+    assert await repo.add_required_chat(offer.id, cid) is True
+    assert await repo.add_required_chat(offer.id, cid) is False
+    assert len(await repo.list_required_chats(offer.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_d2_same_channel_can_link_to_two_offers(database: Database) -> None:
+    first, second = await make_offer(database, "d2-a"), await make_offer(database, "d2-b")
+    cid = -1001234567890
+    await RequiredChatRepository(database).upsert(RequiredChat(cid, "channel", "One", "one", True, 1, 1, "https://t.me/one"))
+    repo = OfferRequirementRepository(database)
+    assert await repo.add_required_chat(first.id, cid) is True
+    assert await repo.add_required_chat(second.id, cid) is True
+    assert len(await repo.list_required_chats(first.id)) == len(await repo.list_required_chats(second.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_d3_duplicate_wizard_link_shows_graceful_notice(database: Database) -> None:
+    configure_admin_ids((OWNER,))
+    offer = await make_offer(database, "d3")
+    cid = -1001234567890
+    await RequiredChatRepository(database).upsert(RequiredChat(cid, "channel", "Old", "one", True, 1, 1, "https://t.me/old"))
+    await OfferRequirementRepository(database).add_required_chat(offer.id, cid)
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "campaign",
+             "input": {"kind": "campaign_chat"}, "wizard": {"offer_id": offer.id, "chat_step": "invite_url", "identifier": "@one", "display_name": "New"}}
+    bot = SimpleNamespace(get_chat=AsyncMock(return_value=SimpleNamespace(id=cid, type="channel", username="one", title="Old")), edit_message_text=AsyncMock(), send_message=AsyncMock())
+    await run_message_handler(message_update("https://t.me/new"), context_for(database, state, bot))
+    assert "already required" in bot.edit_message_text.await_args.kwargs["text"]
+    assert len(await OfferRequirementRepository(database).list_required_chats(offer.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_d4_duplicate_wizard_name_change_is_explicitly_reported(database: Database) -> None:
+    configure_admin_ids((OWNER,))
+    offer = await make_offer(database, "d4")
+    cid = -1001234567890
+    await RequiredChatRepository(database).upsert(RequiredChat(cid, "channel", "Old", "one", True, 1, 1, "https://t.me/old"))
+    await OfferRequirementRepository(database).add_required_chat(offer.id, cid)
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "campaign",
+             "input": {"kind": "campaign_chat"}, "wizard": {"offer_id": offer.id, "chat_step": "invite_url", "identifier": "@one", "display_name": "New"}}
+    bot = SimpleNamespace(get_chat=AsyncMock(return_value=SimpleNamespace(id=cid, type="channel", username="one", title="Old")), edit_message_text=AsyncMock(), send_message=AsyncMock())
+    await run_message_handler(message_update("https://t.me/new"), context_for(database, state, bot))
+    row = (await RequiredChatRepository(database).list_enabled())[0]
+    assert row.title == "New"
+    assert "Display name updated" in bot.edit_message_text.await_args.kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_user_data_none_channel_post_does_not_crash() -> None:
+    from media_bot.handlers.panel import expire_panel_flow_before_command
+    update = Update.de_json({"update_id": 99, "channel_post": {"message_id": 1, "date": 1, "chat": {"id": -1001, "type": "channel"}, "text": "/start"}}, bot=None)
+    await expire_panel_flow_before_command(update, SimpleNamespace(user_data=None))
+
+
+@pytest.mark.asyncio
+async def test_panel_callback_answer_timeout_does_not_abort_dispatch(database: Database, monkeypatch) -> None:
+    configure_admin_ids((OWNER,))
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "home"}
+    monkeypatch.setattr(CallbackQuery, "answer", AsyncMock(side_effect=TimeoutError("callback expired")))
+    edit_message_text = AsyncMock()
+    monkeypatch.setattr(CallbackQuery, "edit_message_text", edit_message_text)
+    update = callback_update("m6:n:home")
+    await CallbackQueryHandler(panel.admin_panel_callback, pattern=r"^m6:").callback(update, context_for(database, state))
+    edit_message_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_r1_empty_campaign_requirement_picker_prompts_inline_creation(database: Database) -> None:
+    offer = await make_offer(database, "r1")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "campaign"}
+    query = SimpleNamespace(edit_message_text=AsyncMock())
+    context = context_for(database, state, SimpleNamespace())
+    await panel._show_campaign_requirement_picker(context, state, offer.id, query=query)
+    assert "Reply 'new'" in query.edit_message_text.await_args.kwargs["text"]
+    assert state["input"]["kind"] == "campaign_requirement_new"
+
+
+@pytest.mark.asyncio
+async def test_r2_inline_new_starts_react_requirement_wizard(database: Database) -> None:
+    offer = await make_offer(database, "r2")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "campaign",
+             "input": {"kind": "campaign_requirement_new"}, "wizard": {"offer_id": offer.id}}
+    bot = SimpleNamespace(edit_message_text=AsyncMock())
+    await run_message_handler(message_update("new"), context_for(database, state, bot))
+    assert state["wizard"]["campaign_offer_id"] == offer.id
+    assert state["wizard"]["step"] == "type"
+    assert state["input"] is None
+    assert state["view"] == "rule_wizard_type"
+
+
+@pytest.mark.asyncio
+async def test_r3_existing_react_requirement_links_without_duplicate(database: Database) -> None:
+    offer = await make_offer(database, "r3")
+    requirement = await RequirementRepository(database).create(category_id=None, requirement_type="REACT", target=-1001, is_fake=True, wait_seconds=0)
+    state = {"nonce": "n"}
+    await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
+    await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
+    assert len(await OfferRequirementRepository(database).list_requirements(offer.id)) == 1

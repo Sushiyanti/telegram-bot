@@ -850,19 +850,28 @@ class OfferRequirementRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def add_required_chat(self, offer_id: int, chat_id: int, *, sort_order: int = 0) -> OfferRequiredChat:
+    async def add_required_chat(self, offer_id: int, chat_id: int, *, sort_order: int = 0) -> bool:
         _require_positive_int(offer_id, "offer_id")
         _require_nonzero_int(chat_id, "chat_id")
         _require_order(sort_order)
-        try:
-            async with self.database.connection() as connection:
-                await connection.execute(
-                    """INSERT INTO offer_required_chats (offer_id, chat_id, sort_order)
-                       VALUES (?, ?, ?)""", (offer_id, chat_id, sort_order)
-                )
-        except sqlite3.IntegrityError as exc:
-            raise InvalidRecord("Offer or required chat does not exist, or the chat is already assigned") from exc
-        return OfferRequiredChat(offer_id, chat_id, sort_order, True)
+        async with self.database.connection() as connection:
+            offer = await (await connection.execute(
+                "SELECT 1 FROM offers WHERE id = ?", (offer_id,)
+            )).fetchone()
+            if offer is None:
+                raise InvalidRecord("Offer not found")
+            chat = await (await connection.execute(
+                "SELECT 1 FROM required_chats WHERE chat_id = ?", (chat_id,)
+            )).fetchone()
+            if chat is None:
+                raise InvalidRecord("Channel is not registered; add it via the wizard first")
+            cursor = await connection.execute(
+                """INSERT INTO offer_required_chats (offer_id, chat_id, sort_order)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(offer_id, chat_id) DO NOTHING""",
+                (offer_id, chat_id, sort_order),
+            )
+        return cursor.rowcount == 1
 
     async def remove_required_chat(self, offer_id: int, chat_id: int) -> bool:
         _require_positive_int(offer_id, "offer_id")
@@ -884,19 +893,28 @@ class OfferRequirementRepository:
             rows = await (await connection.execute(query, (offer_id,))).fetchall()
         return tuple(_offer_required_chat_from_row(row) for row in rows)
 
-    async def add_requirement(self, offer_id: int, requirement_id: int, *, sort_order: int = 0) -> OfferRequirement:
+    async def add_requirement(self, offer_id: int, requirement_id: int, *, sort_order: int = 0) -> bool:
         _require_positive_int(offer_id, "offer_id")
         _require_positive_int(requirement_id, "requirement_id")
         _require_order(sort_order)
-        try:
-            async with self.database.connection() as connection:
-                await connection.execute(
-                    """INSERT INTO offer_requirements (offer_id, requirement_id, sort_order)
-                       VALUES (?, ?, ?)""", (offer_id, requirement_id, sort_order)
-                )
-        except sqlite3.IntegrityError as exc:
-            raise InvalidRecord("Offer or requirement does not exist, or the requirement is already assigned") from exc
-        return OfferRequirement(offer_id, requirement_id, sort_order)
+        async with self.database.connection() as connection:
+            offer = await (await connection.execute(
+                "SELECT 1 FROM offers WHERE id = ?", (offer_id,)
+            )).fetchone()
+            if offer is None:
+                raise InvalidRecord("Offer not found")
+            requirement = await (await connection.execute(
+                "SELECT 1 FROM requirements WHERE id = ?", (requirement_id,)
+            )).fetchone()
+            if requirement is None:
+                raise InvalidRecord("Requirement not found")
+            cursor = await connection.execute(
+                """INSERT INTO offer_requirements (offer_id, requirement_id, sort_order)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(offer_id, requirement_id) DO NOTHING""",
+                (offer_id, requirement_id, sort_order),
+            )
+        return cursor.rowcount == 1
 
     async def remove_requirement(self, offer_id: int, requirement_id: int) -> bool:
         _require_positive_int(offer_id, "offer_id")

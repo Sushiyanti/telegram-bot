@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from telegram.ext import CallbackQueryHandler
 
 from media_bot.config import Settings
 from media_bot.db.database import Database
@@ -308,3 +309,63 @@ async def test_p11_tampered_nonce_is_rejected_without_evaluation(database: Datab
     assert any("Expired" in str(call.args[0]) for call in query.answer.await_args_list if call.args)
     query.edit_message_text.assert_not_awaited()
     assert bot.copy_message.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_v1_left_member_gate_markup_contains_verify_button(database: Database) -> None:
+    offer, token = await create_offer(database, chats=((-1001, "one", "https://t.me/one"),))
+    bot = bot_for(SimpleNamespace(status="left"))
+    update = update_for(USER_A, [token])
+    await start_command(update, context_for(database, USER_A, bot, [token]))
+    markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+    assert any(
+        button.callback_data and button.callback_data.startswith("verify:")
+        for row in markup.inline_keyboard for button in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_member_start_delivers_and_records_unlock(database: Database) -> None:
+    offer, token = await create_offer(database, chats=((-1001, "one", "https://t.me/one"),))
+    bot = bot_for(SimpleNamespace(status="member"))
+    await start_command(update_for(USER_A, [token]), context_for(database, USER_A, bot, [token]))
+    assert bot.copy_message.await_count == 2
+    assert await event_types(database, offer.id, USER_A) == ["start", "unlock", "delivery"]
+
+
+@pytest.mark.asyncio
+async def test_v3_registered_verify_handler_delivers_after_membership_changes(database: Database) -> None:
+    offer, token = await create_offer(database, chats=((-1001, "one", "https://t.me/one"),))
+    bot = bot_for(SimpleNamespace(status="left"), SimpleNamespace(status="member"))
+    context = context_for(database, USER_A, bot, [token])
+    update = update_for(USER_A, [token])
+    await start_command(update, context)
+    markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+    callback_data = next(
+        button.callback_data for row in markup.inline_keyboard for button in row
+        if button.callback_data and button.callback_data.startswith("verify:")
+    )
+    query = SimpleNamespace(data=callback_data, from_user=SimpleNamespace(id=USER_A), answer=AsyncMock(), edit_message_text=AsyncMock(), message=update.effective_message)
+    handler = CallbackQueryHandler(verify_callback, pattern=r"^verify:")
+    await handler.callback(SimpleNamespace(callback_query=query), context)
+    assert bot.copy_message.await_count == 2
+    assert await event_types(database, offer.id, USER_A) == ["start", "unlock", "delivery"]
+
+
+@pytest.mark.asyncio
+async def test_v4_verify_answer_timeout_does_not_abort_delivery(database: Database) -> None:
+    from telegram.error import TimedOut
+    offer, token = await create_offer(database, chats=((-1001, "one", "https://t.me/one"),))
+    bot = bot_for(SimpleNamespace(status="left"), SimpleNamespace(status="member"))
+    context = context_for(database, USER_A, bot, [token])
+    update = update_for(USER_A, [token])
+    await start_command(update, context)
+    markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+    callback_data = next(
+        button.callback_data for row in markup.inline_keyboard for button in row
+        if button.callback_data and button.callback_data.startswith("verify:")
+    )
+    query = SimpleNamespace(data=callback_data, from_user=SimpleNamespace(id=USER_A), answer=AsyncMock(side_effect=TimedOut()), edit_message_text=AsyncMock(), message=update.effective_message)
+    await verify_callback(SimpleNamespace(callback_query=query), context)
+    assert bot.copy_message.await_count == 2
+    assert await event_types(database, offer.id, USER_A) == ["start", "unlock", "delivery"]

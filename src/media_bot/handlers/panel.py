@@ -64,6 +64,8 @@ def _panel_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str | None:
 
 
 def _panel(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any] | None:
+    if context.user_data is None:
+        return None
     value = context.user_data.get(_PANEL_KEY)
     return value if isinstance(value, dict) else None
 
@@ -199,7 +201,15 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.warning("admin_panel_send_failed (%s)", type(exc).__name__)
         return
     state["message_id"] = int(sent.message_id)
-    context.user_data[_PANEL_KEY] = state
+    if context.user_data is not None:
+        context.user_data[_PANEL_KEY] = state
+
+
+async def _answer_callback(query: Any, *args: Any, **kwargs: Any) -> None:
+    try:
+        await query.answer(*args, **kwargs)
+    except Exception:
+        logger.debug("callback_answer_failed (continuing)", exc_info=True)
 
 
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,13 +221,13 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     data = str(query.data or "")
     parts = data.split(":")
     if len(parts) < 3 or parts[0] != "m6":
-        await query.answer("Invalid panel action.", show_alert=True)
+        await _answer_callback(query, "Invalid panel action.", show_alert=True)
         return
 
     database = _database(context)
     if not await is_admin(int(user.id), database):
         await _audit_denial(database, int(user.id), "admin_panel_callback")
-        await query.answer("Not authorized.", show_alert=True)
+        await _answer_callback(query, "Not authorized.", show_alert=True)
         return
 
     state = _panel(context)
@@ -234,10 +244,10 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         or int(getattr(query_message, "message_id", 0)) != int(state.get("message_id", -1))
         or int(getattr(query_chat, "id", 0)) != int(user.id)
     ):
-        await query.answer("This panel is expired or unavailable.", show_alert=True)
+        await _answer_callback(query, "This panel is expired or unavailable.", show_alert=True)
         return
 
-    await query.answer()
+    await _answer_callback(query)
     if _expire_pending_flow(state):
         await _edit_panel(context, state, "Admin Control Panel", _home_markup(state), query=query)
         return
@@ -384,6 +394,17 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await _edit_panel(context, state, f"That action could not be completed. {exc}. Reply /panel to return.", _back_home(state))
         else:
             raise InvalidRecord("channel setup step is invalid")
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "campaign_requirement_new":
+        wizard = state.get("wizard")
+        value = getattr(message, "text", None)
+        if not isinstance(wizard, dict) or not isinstance(value, str) or value.strip().casefold() != "new":
+            await _edit_panel(context, state, "Reply 'new' to create a REACT requirement, or press Cancel.", _input_markup(state))
+            raise ApplicationHandlerStop
+        offer_id = int(wizard["offer_id"])
+        await _start_requirement_input(context, state, None)
+        state["wizard"]["campaign_offer_id"] = offer_id
         raise ApplicationHandlerStop
 
     if pending.get("kind") == "campaign_title":
@@ -716,6 +737,13 @@ async def _dispatch_callback(
         await _remove_campaign_chat(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
     elif action == "cmpaddreq":
         await _show_campaign_requirement_picker(context, state, _int_arg(args, 0), query=query)
+    elif action == "cmpreqnew_cancel":
+        wizard = state.get("wizard")
+        if not isinstance(wizard, dict):
+            raise InvalidRecord("requirement creation is incomplete")
+        offer_id = int(wizard["offer_id"])
+        _clear_pending_flow(state)
+        await _show_campaign(context, state, offer_id, query=query, notice="Requirement creation cancelled.")
     elif action == "cmpreq":
         await _add_campaign_requirement(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
     elif action == "cmrr":
@@ -1233,6 +1261,8 @@ async def _select_rule_type(
     wizard = _require_rule_wizard(state)
     if rule_type not in {"JOIN_CHAT", "REACT", "START_BOT", "TIMED_WAIT"}:
         raise ValueError("Unknown rule type")
+    if wizard.get("campaign_offer_id") is not None and rule_type != "REACT":
+        raise InvalidRecord("Campaign requirements must be REACT rules")
     wizard.update({"type": rule_type, "step": "target"})
     if rule_type == "TIMED_WAIT":
         wizard["target"] = None
@@ -1481,6 +1511,19 @@ async def _save_rule(
         str(created.id),
         target_type="requirement",
     )
+    campaign_offer_id = wizard.get("campaign_offer_id")
+    if campaign_offer_id is not None:
+        linked = await OfferRequirementRepository(_database(context)).add_requirement(int(campaign_offer_id), created.id)
+        _clear_pending_flow(state)
+        await _show_campaign(
+            context,
+            state,
+            int(campaign_offer_id),
+            query=query,
+            notice=("REACT requirement created and linked to this campaign."
+                    if linked else "That REACT requirement is already linked to this campaign."),
+        )
+        return
     _clear_pending_flow(state)
     await _show_requirements(
         context,
@@ -2018,15 +2061,23 @@ async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
         await _edit_panel(context, state, "An invite URL is required when Telegram does not provide a public username.", _input_markup(state), query=query)
         return
     title = str(wizard.get("display_name") or username or getattr(chat, "title", "Required channel"))
+    existing = next((row for row in await RequiredChatRepository(_database(context)).list_enabled() if row.chat_id == int(chat.id)), None)
+    name_changed = existing is not None and existing.title != title
     await RequiredChatRepository(_database(context)).upsert(RequiredChat(chat_id=int(chat.id), chat_type=chat_type, title=title, username=username, invite_url=invite_url))
-    await OfferRequirementRepository(_database(context)).add_required_chat(int(wizard["offer_id"]), int(chat.id))
+    linked = await OfferRequirementRepository(_database(context)).add_required_chat(int(wizard["offer_id"]), int(chat.id))
     offer_id = int(wizard["offer_id"])
     _clear_pending_flow(state)
-    await _show_campaign(context, state, offer_id, query=query, notice="Channel requirement added.")
+    notice = "Channel requirement added." if linked else (
+        "That channel was already required for this offer. Display name updated."
+        if name_changed else "That channel is already required for this offer."
+    )
+    await _show_campaign(context, state, offer_id, query=query, notice=notice)
 
 
 async def _add_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
-    await OfferRequirementRepository(_database(context)).add_required_chat(offer_id, chat_id); await _show_campaign(context, state, offer_id, query=query, notice="Channel requirement added.")
+    linked = await OfferRequirementRepository(_database(context)).add_required_chat(offer_id, chat_id)
+    notice = "Channel requirement added." if linked else "That channel is already required for this offer."
+    await _show_campaign(context, state, offer_id, query=query, notice=notice)
 
 
 async def _remove_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
@@ -2036,12 +2087,20 @@ async def _remove_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
 async def _show_campaign_requirement_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
     requirements = tuple(item for item in await RequirementRepository(_database(context)).list_all() if item.type == "REACT")
     rows = [[_button(f"{item.type} · {item.id}", state, "cmpreq", offer_id, item.id)] for item in requirements]
-    text = "Choose an existing requirement (including REACT)." if requirements else "No REACT requirements defined yet. Use /addreq on the admin channel to create one, then return here."
+    if requirements:
+        text = "Choose an existing requirement (including REACT)."
+    else:
+        state["wizard"] = {"offer_id": offer_id}
+        state["input"] = {"kind": "campaign_requirement_new"}
+        _touch_pending_flow(state)
+        text = "No REACT requirements yet. Reply 'new' to create one now, or /panel to return."
+        rows.append([_button("Cancel", state, "cmpreqnew_cancel")])
     rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, text, _markup(rows), query=query)
 
 
 async def _add_campaign_requirement(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, requirement_id: int, *, query: Any = None) -> None:
-    await OfferRequirementRepository(_database(context)).add_requirement(offer_id, requirement_id); await _show_campaign(context, state, offer_id, query=query, notice="Requirement added.")
+    linked = await OfferRequirementRepository(_database(context)).add_requirement(offer_id, requirement_id)
+    await _show_campaign(context, state, offer_id, query=query, notice="Requirement added." if linked else "That requirement is already linked to this campaign.")
 
 
 async def _remove_campaign_requirement(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, requirement_id: int, *, query: Any = None) -> None:
