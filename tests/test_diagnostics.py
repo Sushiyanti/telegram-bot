@@ -89,7 +89,7 @@ async def test_configcheck_mocked_pass_is_redacted(
     assert "[PASS] Storage channel is private" in output
     assert "2 configured; IDs redacted" in output
     assert "[PASS] Database open: open" in output
-    assert "[PASS] Database schema version: version 6" in output
+    assert "[PASS] Database schema version: version 8" in output
     assert "[PASS] Database writable: writable" in output
     assert "[PASS] MAX_RELAY_FILE_BYTES: 2147483648 bytes" in output
     assert "CONFIGCHECK_EXIT_CODE=0" in caplog.text
@@ -130,7 +130,7 @@ async def test_configcheck_mocked_fail_logs_nonzero_and_redacts_errors(
     assert "[FAIL] Bot token valid (getMe)" in output
     assert "[FAIL] Bot is a storage-channel administrator" in output
     assert "[FAIL] Storage channel is private" in output
-    assert "[FAIL] Database schema version: expected 6; found 1" in output
+    assert "[FAIL] Database schema version: expected 8; found 1" in output
     assert "[PASS] Database writable: writable" in output
     assert "CONFIGCHECK_EXIT_CODE=1" in caplog.text
     assert "secret-test-token" not in output

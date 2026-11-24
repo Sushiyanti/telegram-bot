@@ -93,7 +93,7 @@ def test_home_keyboard_has_four_primary_sections() -> None:
     markup = _home_markup({"nonce": "test1234"})
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert labels == [
-        "📁 Categories", "📜 Requirements", "👥 Staff", "⚙️ Settings", "Close Menu",
+        "📣 Campaigns", "📜 Requirements", "👥 Staff", "⚙️ Settings", "📊 Stats", "Close Menu",
     ]
     for row in markup.inline_keyboard:
         for button in row:
@@ -109,7 +109,7 @@ async def test_panel_callbacks_edit_the_bound_message_without_new_bot_messages(d
     context.bot.send_message.assert_awaited_once()
     sent_markup = context.bot.send_message.await_args.kwargs["reply_markup"]
     assert [button.text for row in sent_markup.inline_keyboard for button in row][:4] == [
-        "📁 Categories", "📜 Requirements", "👥 Staff", "⚙️ Settings",
+        "📣 Campaigns", "📜 Requirements", "👥 Staff", "⚙️ Settings",
     ]
 
     query = await press(context, "staff")
