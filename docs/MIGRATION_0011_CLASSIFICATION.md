@@ -2,7 +2,7 @@
 
 Source: disposable copy `/tmp/telegram-bot-live/bot.db` (schema version 10).
 
-Classification uses the actual legacy `offers.slug_hint` marker: migrations 0007/0010 generated `legacy-<share_link_id>` offers, while campaign-created offers have no legacy marker. Category applicability follows the existing implementation: a category receives assignments attached to itself and linked descendants.
+Classification uses the actual legacy `offers.slug_hint` marker and historical sort-order evidence. Migrations 0007/0010 generated `legacy-<share_link_id>` offers and copied assignments with `sort_order=requirement_id`; the campaign repository's default direct-assignment sort order is `0`. A legacy row with `sort_order=0` is therefore retained as direct, while a legacy row with a nonzero sort order and no currently applicable global/descendant-category source is ambiguous and aborts migration. Category applicability follows the existing implementation: a category receives assignments attached to itself and linked descendants. The reviewed copy contains no category assignments, so separate disposable category fixtures are covered by `tests/test_migration_0011.py`.
 
 | Offer | Item | Item category | Requirement | Type | Target | Global match | Category assignments | Classification | Reason |
 |---:|---:|---:|---:|---|---:|---:|---|---|---|

@@ -922,8 +922,8 @@ class OfferRequirementRepository:
                        SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
                        WHERE o.id = ? AND i.category_id IS NOT NULL
                        UNION
-                       SELECT cl.parent_category_id FROM category_links cl
-                       JOIN inherited i ON cl.child_category_id = i.category_id
+                       SELECT cl.child_category_id FROM category_links cl
+                       JOIN inherited i ON cl.parent_category_id = i.category_id
                    )
                    SELECT DISTINCT ? AS offer_id, r.target_chat_id AS chat_id,
                           ra.sort_order, 1 AS is_enabled
@@ -932,7 +932,7 @@ class OfferRequirementRepository:
                          ra.scope_type = 'GLOBAL'
                          OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
                          OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
-                   ) ORDER BY ra.sort_order, r.target_chat_id""",
+                   ) ORDER BY CASE ra.scope_type WHEN 'GLOBAL' THEN 0 WHEN 'CATEGORY' THEN 1 ELSE 2 END, ra.sort_order, r.target_chat_id""",
                 (offer_id, offer_id, offer_id))).fetchall()
         return tuple(_offer_required_chat_from_row(row) for row in rows)
 
@@ -969,8 +969,8 @@ class OfferRequirementRepository:
                        SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
                        WHERE o.id = ? AND i.category_id IS NOT NULL
                        UNION
-                       SELECT cl.parent_category_id FROM category_links cl
-                       JOIN inherited i ON cl.child_category_id = i.category_id
+                       SELECT cl.child_category_id FROM category_links cl
+                       JOIN inherited i ON cl.parent_category_id = i.category_id
                    )
                    SELECT DISTINCT ? AS offer_id, ra.requirement_id, ra.sort_order
                    FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
@@ -978,7 +978,7 @@ class OfferRequirementRepository:
                          ra.scope_type = 'GLOBAL'
                          OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
                          OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
-                   ) ORDER BY ra.sort_order, ra.requirement_id""",
+                   ) ORDER BY CASE ra.scope_type WHEN 'GLOBAL' THEN 0 WHEN 'CATEGORY' THEN 1 ELSE 2 END, ra.sort_order, ra.requirement_id""",
                 (offer_id, offer_id, offer_id))).fetchall()
         return tuple(_offer_requirement_from_row(row) for row in rows)
 

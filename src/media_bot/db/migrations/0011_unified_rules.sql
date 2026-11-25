@@ -75,6 +75,7 @@ applicable(requirement_id, offer_id) AS (
 SELECT CASE WHEN EXISTS (
     SELECT 1 FROM legacy_offer_requirements lor JOIN offers o ON o.id = lor.offer_id
     WHERE o.slug_hint LIKE 'legacy-%'
+      AND lor.sort_order <> 0
       AND NOT EXISTS (
           SELECT 1 FROM applicable a
           WHERE a.requirement_id = lor.requirement_id AND a.offer_id = lor.offer_id
@@ -124,9 +125,9 @@ WITH RECURSIVE item_categories(offer_id, category_id) AS (
     SELECT o.id, i.category_id FROM offers o JOIN items i ON i.id = o.item_id
     WHERE i.category_id IS NOT NULL
     UNION
-    SELECT item_categories.offer_id, cl.parent_category_id
+    SELECT item_categories.offer_id, cl.child_category_id
     FROM item_categories
-    JOIN category_links cl ON cl.child_category_id = item_categories.category_id
+    JOIN category_links cl ON cl.parent_category_id = item_categories.category_id
 ),
 applicable(req_id, offer_id) AS (
     SELECT lcr.requirement_id, o.id
@@ -142,6 +143,7 @@ SELECT lor.requirement_id, 'OFFER', lor.offer_id, lor.sort_order
 FROM legacy_offer_requirements lor
 JOIN offers o ON o.id = lor.offer_id
 WHERE o.slug_hint NOT LIKE 'legacy-%'
+   OR lor.sort_order = 0
    OR NOT EXISTS (
     SELECT 1 FROM applicable a
     WHERE a.req_id = lor.requirement_id AND a.offer_id = lor.offer_id
