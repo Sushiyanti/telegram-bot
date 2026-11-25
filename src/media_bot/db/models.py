@@ -150,6 +150,7 @@ class Offer:
     created_at_ms: int
     updated_at_ms: int
     slug_plain: str | None = None
+    share_link_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

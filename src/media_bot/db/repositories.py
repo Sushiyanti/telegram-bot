@@ -472,6 +472,28 @@ class ShareLinkRepository:
             await connection.commit()
         return None if row is None else _share_link_from_row(row)
 
+    async def consume_by_id(self, link_id: int, *, now_ms: int) -> ShareLink | None:
+        """Atomically consume one still-valid use of a linked offer share link."""
+        _require_positive_int(link_id, "link_id")
+        _require_time(now_ms, "now_ms")
+        async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                """UPDATE share_links SET use_count = use_count + 1
+                   WHERE id = ? AND revoked_at_ms IS NULL
+                     AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                     AND (max_uses IS NULL OR use_count < max_uses)""",
+                (link_id, now_ms),
+            )
+            if cursor.rowcount != 1:
+                await connection.rollback()
+                return None
+            row = await (await connection.execute(
+                "SELECT * FROM share_links WHERE id = ?", (link_id,)
+            )).fetchone()
+            await connection.commit()
+        return None if row is None else _share_link_from_row(row)
+
     async def revoke_by_hash(self, token_hash: bytes, *, revoked_at_ms: int) -> bool:
         if not isinstance(token_hash, bytes) or len(token_hash) != 32:
             raise InvalidRecord("token_hash must be a 32-byte SHA-256 digest")
@@ -1450,6 +1472,7 @@ def _offer_from_row(row: sqlite3.Row) -> Offer:
         is_enabled=bool(row["is_enabled"]), created_by_user_id=int(row["created_by_user_id"]),
         created_at_ms=int(row["created_at_ms"]), updated_at_ms=int(row["updated_at_ms"]),
         slug_plain=row["slug_plain"] if "slug_plain" in row.keys() else None,
+        share_link_id=(int(row["share_link_id"]) if "share_link_id" in row.keys() and row["share_link_id"] is not None else None),
     )
 
 

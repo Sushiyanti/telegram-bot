@@ -8,7 +8,7 @@ import logging
 import time
 from typing import Any
 
-from media_bot.db.repositories import ItemRepository, OfferDeliveryRepository, OfferEventRepository
+from media_bot.db.repositories import ItemRepository, OfferDeliveryRepository, OfferEventRepository, ShareLinkRepository
 from media_bot.media_transfer import send_one
 
 
@@ -28,6 +28,12 @@ async def deliver_offer(context: Any, offer: Any, user_id: int) -> DeliveryOutco
     settings = context.application.bot_data["settings"]
     now_ms = time.time_ns() // 1_000_000
     deliveries = OfferDeliveryRepository(database)
+    if offer.share_link_id is not None:
+        consumed = await ShareLinkRepository(database).consume_by_id(
+            int(offer.share_link_id), now_ms=now_ms
+        )
+        if consumed is None:
+            return DeliveryOutcome(False, 0, "share_link_unavailable")
     try:
         await deliveries.record_unlock(offer.id, user_id, at_ms=now_ms)
     except Exception:
