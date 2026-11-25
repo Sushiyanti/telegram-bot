@@ -22,11 +22,11 @@ async def make_item(db: Database) -> int:
     return item.id
 
 @pytest.mark.asyncio
-async def test_a1_schema_is_v8_and_plaintext_is_null_for_backfilled_shape(database: Database) -> None:
+async def test_a1_schema_is_current_and_plaintext_is_null_for_backfilled_shape(database: Database) -> None:
     async with database.connection() as connection:
         version = await (await connection.execute("PRAGMA user_version")).fetchone()
         columns = await (await connection.execute("PRAGMA table_info(offers)")).fetchall()
-    assert version[0] == 8
+    assert version[0] == 10
     assert next(row for row in columns if row["name"] == "slug_plain")["notnull"] == 0
 
 @pytest.mark.asyncio

@@ -529,7 +529,7 @@ class ReactionRepository:
         message_id: int,
         emojis: tuple[str, ...],
         updated_at_ms: int,
-    ) -> None:
+    ) -> bool:
         _positive_id(user_id, "user_id")
         _chat_id(channel_id, "channel_id")
         _positive_id(message_id, "message_id")
@@ -537,13 +537,6 @@ class ReactionRepository:
         clean_emojis = tuple(dict.fromkeys(_emoji_key(value) for value in emojis))
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                "SELECT 1 FROM observed_channel_posts WHERE channel_id = ? AND message_id = ?",
-                (channel_id, message_id),
-            )
-            if await cursor.fetchone() is None:
-                await connection.rollback()
-                return
             await connection.execute(
                 "DELETE FROM user_reactions WHERE user_id = ? AND channel_id = ? AND message_id = ?",
                 (user_id, channel_id, message_id),
@@ -556,6 +549,30 @@ class ReactionRepository:
                     (user_id, channel_id, message_id, emoji, updated_at_ms),
                 )
             await connection.commit()
+        return True
+
+    async def has_reaction(
+        self,
+        *,
+        user_id: int,
+        channel_id: int,
+        message_id: int,
+        required_emoji: str | None = None,
+    ) -> bool:
+        """Check one exact post without requiring a prior channel_post update."""
+        _positive_id(user_id, "user_id")
+        _chat_id(channel_id, "channel_id")
+        _positive_id(message_id, "message_id")
+        async with self.database.connection() as connection:
+            query = """SELECT 1 FROM user_reactions
+                       WHERE user_id = ? AND channel_id = ? AND message_id = ?"""
+            params: tuple[object, ...] = (user_id, channel_id, message_id)
+            if required_emoji:
+                query += " AND emoji = ?"
+                params += (required_emoji,)
+            query += " LIMIT 1"
+            cursor = await connection.execute(query, params)
+            return await cursor.fetchone() is not None
 
     async def has_recent_reaction(
         self,

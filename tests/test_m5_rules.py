@@ -143,7 +143,7 @@ async def test_schema_v5_seeds_default_and_backfills_legacy_items(tmp_path: Path
     default = await CategoryRepository(database).default()
     version, _ = await database.health_check()
 
-    assert version == 8
+    assert version == 10
     assert default.name == "Default"
     assert default.storage_channel_id == STORAGE_ID
     assert item is not None and item.category_id == default.id

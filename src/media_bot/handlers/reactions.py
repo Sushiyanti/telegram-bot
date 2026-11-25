@@ -40,6 +40,10 @@ class ReactionUpdateHandler:
         chat = getattr(change, "chat", None)
         if user is None or chat is None:
             # Anonymous reactions do not identify an individual user.
+            logger.info(
+                "reaction_update_rejected identifiable_user=false channel_id=%s message_id=%s reason=anonymous",
+                getattr(chat, "id", None), getattr(change, "message_id", None),
+            )
             return
         emojis = tuple(
             key for reaction in (getattr(change, "new_reaction", None) or ())
@@ -48,15 +52,24 @@ class ReactionUpdateHandler:
         change_date = getattr(change, "date", None)
         changed_at_ms = int(change_date.timestamp() * 1000) if change_date is not None else _now_ms()
         try:
-            await self.repository.replace_user_message_reactions(
+            persisted = await self.repository.replace_user_message_reactions(
                 user_id=int(user.id),
                 channel_id=int(chat.id),
                 message_id=int(change.message_id),
                 emojis=emojis,
                 updated_at_ms=changed_at_ms,
             )
+            logger.info(
+                "reaction_update_%s user_id=%s channel_id=%s message_id=%s emoji=%s",
+                "persisted" if persisted else "rejected",
+                int(user.id), int(chat.id), int(change.message_id), list(emojis),
+            )
         except Exception as exc:
-            logger.error("reaction_update_record_failed (%s)", type(exc).__name__)
+            logger.error(
+                "reaction_update_record_failed user_id=%s channel_id=%s message_id=%s (%s)",
+                getattr(user, "id", None), getattr(chat, "id", None),
+                getattr(change, "message_id", None), type(exc).__name__,
+            )
 
 
 def _reaction_key(reaction: Any) -> str | None:

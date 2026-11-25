@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from media_bot.db.rules import Requirement
+
+logger = logging.getLogger(__name__)
 
 
 class OfferNotFound(LookupError):
@@ -126,17 +130,36 @@ class OfferEvaluator:
             settings = getattr(requirement, "settings", {}) or {}
             try:
                 channel_id = int(getattr(requirement, "target"))
-                passed = await self.reaction_repo.has_recent_reaction(
-                    user_id=user_id,
-                    channel_id=channel_id,
-                    last_x_messages=int(settings.get("last_x_messages", 5)),
-                    last_x_days=int(settings.get("last_x_days", 0)),
-                    required_emoji=(
-                        str(settings["reaction_emoji"])
-                        if settings.get("reaction_emoji") else None
-                    ),
+                logger.info(
+                    "offer_requirement_evaluation offer_id=%s user_id=%s requirement_id=%s type=REACT channel_id=%s mode=%s",
+                    offer_id, user_id, getattr(requirement, "id", None), channel_id,
+                    settings.get("react_post", "any_recent"),
                 )
-                reason = None if passed else "missing_reaction"
+                required_emoji = (
+                    str(settings["reaction_emoji"])
+                    if settings.get("reaction_emoji") else None
+                )
+                react_post = str(settings.get("react_post", "any_recent")).strip()
+                message_id = _specific_message_id(react_post)
+                if react_post.casefold() != "any_recent" and message_id is None:
+                    passed, reason = False, "misconfigured_admin"
+                elif message_id is not None and hasattr(self.reaction_repo, "has_reaction"):
+                    passed = await self.reaction_repo.has_reaction(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        message_id=message_id,
+                        required_emoji=required_emoji,
+                    )
+                    reason = None if passed else "missing_reaction"
+                else:
+                    passed = await self.reaction_repo.has_recent_reaction(
+                        user_id=user_id,
+                        channel_id=channel_id,
+                        last_x_messages=int(settings.get("last_x_messages", 5)),
+                        last_x_days=int(settings.get("last_x_days", 0)),
+                        required_emoji=required_emoji,
+                    )
+                    reason = None if passed else "missing_reaction"
             except Exception:
                 passed, reason = False, "unavailable"
             gates.append(OfferGateResult(
@@ -216,6 +239,25 @@ def _requirement_url(requirement: Any) -> str | None:
     settings = getattr(requirement, "settings", {}) or {}
     value = settings.get("link_url")
     return value if isinstance(value, str) and value.startswith("https://") else None
+
+
+def _specific_message_id(value: str) -> int | None:
+    """Return a configured Telegram message ID, or None for any-recent/invalid."""
+    raw = value.strip()
+    if raw.casefold() == "any_recent":
+        return None
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in {"t.me", "telegram.me"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or not parts[-1].isdigit() or int(parts[-1]) <= 0:
+        return None
+    return int(parts[-1])
 
 
 __all__ = [

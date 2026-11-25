@@ -2080,6 +2080,21 @@ async def _show_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, An
     offer = await OfferRepository(_database(context)).get_by_id(offer_id)
     if offer is None: raise RecordNotFound("campaign does not exist")
     repo = OfferRequirementRepository(_database(context)); chats = await repo.list_required_chats(offer_id); reqs = await repo.list_requirements(offer_id)
+    requirement_records = []
+    requirement_repository = RequirementRepository(_database(context))
+    for assignment in reqs:
+        requirement = await requirement_repository.get(assignment.requirement_id)
+        if requirement is None:
+            requirement_records.append(f"Requirement {assignment.requirement_id}: unavailable")
+            continue
+        if requirement.type == "REACT":
+            settings = requirement.settings or {}
+            requirement_records.append(
+                f"REACT {requirement.target}: post={settings.get('react_post', 'any_recent')}; "
+                f"emoji={settings.get('reaction_emoji', 'not configured')}"
+            )
+        else:
+            requirement_records.append(f"{requirement.type}: {requirement.target}")
     registry = {chat.chat_id: chat for chat in await RequiredChatRepository(_database(context)).list_enabled()}
     chat_records = [registry.get(chat.chat_id) for chat in chats]
     username = _panel_bot_username(context)
@@ -2093,7 +2108,8 @@ async def _show_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, An
     channel_lines = "\n".join(
         f"Channel {chat.chat_id}: invite_url={_required_chat_url_status(registry[chat.chat_id]) if chat.chat_id in registry else 'none'}" for chat in chats
     )
-    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{channel_lines}\n{link}{warning}"
+    requirement_lines = "\n".join(requirement_records)
+    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{channel_lines}\n{requirement_lines}\n{link}{warning}"
     rows = [[_button("Disable" if offer.is_enabled else "Enable", state, "cmpdisable" if offer.is_enabled else "cmpenable", offer_id)], [_button("Edit title", state, "cmpedit_title", offer_id), _button("Edit description", state, "cmpedit_desc", offer_id)], [_button("Add channel", state, "cmpaddchat", offer_id)], [_button("Add requirement", state, "cmpaddreq", offer_id)]]
     rows.extend([[_button(f"Remove channel {chat.chat_id}", state, "cmrc", offer_id, chat.chat_id)] for chat in chats])
     rows.extend([[_button(f"Remove requirement {req.requirement_id}", state, "cmrr", offer_id, req.requirement_id)] for req in reqs])

@@ -19,7 +19,7 @@ from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.admins import AdminRepository
 from media_bot.db.database import Database
-from media_bot.handlers.admin import delete_command, fixinvites_command, list_command, stats_command
+from media_bot.handlers.admin import delete_command, fixinvites_command, list_command, reactiondiag_command, stats_command
 from media_bot.handlers.categories import (
     add_category_command,
     add_requirement_command,
@@ -137,6 +137,9 @@ def build_application(settings: Settings) -> Application:
     )
     application.add_handler(
         CommandHandler("fixinvites", admin_only(fixinvites_command), filters=private_commands)
+    )
+    application.add_handler(
+        CommandHandler("reactiondiag", admin_only(reactiondiag_command), filters=private_commands)
     )
     application.add_handler(
         CommandHandler("addcategory", admin_only(add_category_command), filters=private_commands)

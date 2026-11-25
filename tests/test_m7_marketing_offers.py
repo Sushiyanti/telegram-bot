@@ -82,7 +82,7 @@ async def test_v6_to_v7_migration_backfills_existing_hash_and_preserves_multiple
     assert len(offers) == 2
     async with legacy.connection() as connection:
         version = await (await connection.execute("PRAGMA user_version")).fetchone()
-    assert version[0] == 8
+    assert version[0] == 10
 
 
 @pytest.mark.asyncio

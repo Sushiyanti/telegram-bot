@@ -205,3 +205,46 @@ async def fixinvites_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Invite repair complete. Filled: {len(filled)} ({', '.join(map(str, filled)) or 'none'}). "
         f"Failed: {len(failed)} ({', '.join(map(str, failed)) or 'none'})."
     )
+
+
+async def reactiondiag_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report safe reaction-pipeline and configured REACT-gate diagnostics."""
+    message = update.effective_message
+    if message is None:
+        return
+    database = _database(context)
+    offer_filter = ""
+    params: tuple[object, ...] = ()
+    if context.args:
+        if len(context.args) != 1 or _INTEGER.fullmatch(context.args[0]) is None or int(context.args[0]) <= 0:
+            await message.reply_text("Usage: /reactiondiag [offer_id]")
+            return
+        offer_filter = " AND offers.id = ?"
+        params = (int(context.args[0]),)
+    async with database.connection() as connection:
+        rows = await (await connection.execute(
+            """SELECT offers.id offer_id, requirements.id requirement_id,
+                      requirements.target, requirements.settings_json
+               FROM offers
+               JOIN offer_requirements ON offer_requirements.offer_id = offers.id
+               JOIN requirements ON requirements.id = offer_requirements.requirement_id
+               WHERE requirements.type = 'REACT'""" + offer_filter + " ORDER BY offers.id, requirements.id",
+            params,
+        )).fetchall()
+        recent = await (await connection.execute(
+            """SELECT user_id, channel_id, message_id, emoji, updated_at_ms
+               FROM user_reactions ORDER BY updated_at_ms DESC LIMIT 20"""
+        )).fetchall()
+    lines = ["Reaction diagnostics", f"Configured REACT requirements: {len(rows)}"]
+    for row in rows:
+        lines.append(
+            f"offer={row['offer_id']} requirement={row['requirement_id']} "
+            f"channel={row['target']} settings={str(row['settings_json'])[:300]}"
+        )
+    lines.append(f"Persisted reaction rows (latest 20): {len(recent)}")
+    for row in recent:
+        lines.append(
+            f"user={row['user_id']} channel={row['channel_id']} "
+            f"message={row['message_id']} emoji={row['emoji']}"
+        )
+    await message.reply_text("\n".join(lines)[:4_000])
