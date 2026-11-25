@@ -57,7 +57,7 @@ class RequirementEvaluator:
         if requirement.type == "JOIN_CHAT":
             try:
                 membership = await bot.get_chat_member(
-                    chat_id=int(requirement.target), user_id=user_id
+                    chat_id=_requirement_chat_id(requirement), user_id=user_id
                 )
             except Exception as exc:
                 logger.warning("join_chat_check_failed (%s)", type(exc).__name__)
@@ -74,7 +74,7 @@ class RequirementEvaluator:
                 return True
             channel_label = "the required chat"
             try:
-                chat = await bot.get_chat(int(requirement.target))
+                chat = await bot.get_chat(_requirement_chat_id(requirement))
                 username = getattr(chat, "username", None)
                 if isinstance(username, str) and username:
                     channel_label = f"@{username.lstrip('@')}"
@@ -88,7 +88,7 @@ class RequirementEvaluator:
 
         if requirement.type == "REACT":
             last_x_messages = int(settings.get("last_x_messages", 5))
-            channel_id = int(requirement.target)
+            channel_id = _requirement_chat_id(requirement)
             try:
                 bot_id = getattr(bot, "id", None)
                 if not isinstance(bot_id, int) or bot_id <= 0:
@@ -188,6 +188,14 @@ def _link_button_label(requirement_type: str) -> str:
         "REACT": "Open required channel",
         "START_BOT": "Open required bot",
     }.get(requirement_type, "Open Telegram link")
+
+
+def _requirement_chat_id(requirement: Requirement) -> int:
+    """Return the canonical registered chat identity for chat-based rules."""
+    value = requirement.target_chat_id
+    if value is None:
+        raise InvalidRecord("chat requirement has no registered target_chat_id")
+    return int(value)
 
 
 def _link_markup(

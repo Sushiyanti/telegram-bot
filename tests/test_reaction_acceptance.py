@@ -134,3 +134,48 @@ async def test_campaign_wait_seconds_is_read_from_linked_requirements(database: 
         chat_repo=SimpleNamespace(),
     )
     assert await evaluator.configured_wait_seconds(1) == 10
+
+@pytest.mark.asyncio
+async def test_canonical_target_chat_id_wins_over_incorrect_legacy_target(database: Database) -> None:
+    from unittest.mock import AsyncMock
+    repository = ReactionRepository(database)
+    await repository.observe_post(CHANNEL, MESSAGE, 1_800_000_000_000)
+    await repository.replace_user_message_reactions(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, emojis=("👍",), updated_at_ms=1_800_000_001_000)
+    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
+    evaluator = OfferEvaluator(bot=SimpleNamespace(), offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)), requirement_repo=SimpleNamespace(
+        list_required_chats=AsyncMock(return_value=[]), list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
+        get_requirement=AsyncMock(return_value=SimpleNamespace(id=3, type="REACT", target="-1000000000000", target_chat_id=CHANNEL, settings={"react_post": "any_recent", "last_x_messages": 5, "last_x_days": 1000}))), reaction_repo=repository, chat_repo=SimpleNamespace())
+    result = await evaluator.evaluate(1, USER)
+    assert result.all_passed
+    assert result.gates[0].target_id == CHANNEL
+
+@pytest.mark.asyncio
+async def test_update_flow_observe_react_replace_remove_and_any_recent(database: Database) -> None:
+    from unittest.mock import AsyncMock
+    handler = ReactionUpdateHandler(database)
+    post = Update.de_json({"update_id": 1001, "channel_post": {"message_id": MESSAGE, "date": 1800000001, "chat": {"id": CHANNEL, "type": "channel", "title": "Target"}, "text": "fresh post"}}, bot=None)
+    await handler.handle_update(post, None)
+    def update(update_id: int, old: list[dict[str, str]], new: list[dict[str, str]]) -> Update:
+        return Update.de_json({"update_id": update_id, "message_reaction": {"chat": {"id": CHANNEL, "type": "channel", "title": "Target"}, "message_id": MESSAGE, "user": {"id": USER, "is_bot": False, "first_name": "Test"}, "date": 1800000002, "old_reaction": old, "new_reaction": new}}, bot=None)
+    await handler.handle_update(update(1002, [], [{"type": "emoji", "emoji": "👍"}]), None)
+    repository = ReactionRepository(database)
+    assert await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍")
+    await handler.handle_update(update(1003, [{"type": "emoji", "emoji": "👍"}], [{"type": "emoji", "emoji": "❤️"}]), None)
+    assert not await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍")
+    assert await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="❤️")
+    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
+    evaluator = OfferEvaluator(bot=SimpleNamespace(), offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)), requirement_repo=SimpleNamespace(
+        list_required_chats=AsyncMock(return_value=[]), list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
+        get_requirement=AsyncMock(return_value=SimpleNamespace(id=3, type="REACT", target="-1", target_chat_id=CHANNEL, settings={"react_post": "any_recent", "last_x_messages": 5, "last_x_days": 1000}))), reaction_repo=repository, chat_repo=SimpleNamespace())
+    assert (await evaluator.evaluate(1, USER)).all_passed
+    await handler.handle_update(update(1004, [{"type": "emoji", "emoji": "❤️"}], []), None)
+    assert not (await evaluator.evaluate(1, USER)).all_passed
+
+@pytest.mark.asyncio
+async def test_anonymous_and_unrelated_reactions_do_not_satisfy_any_recent(database: Database) -> None:
+    handler = ReactionUpdateHandler(database)
+    anonymous = Update.de_json({"update_id": 2001, "message_reaction": {"chat": {"id": CHANNEL, "type": "channel"}, "message_id": MESSAGE, "date": 1800000001, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]}}, bot=None)
+    await handler.handle_update(anonymous, None)
+    unrelated = Update.de_json({"update_id": 2002, "message_reaction": {"chat": {"id": CHANNEL - 1, "type": "channel"}, "message_id": MESSAGE + 1, "user": {"id": USER, "is_bot": False, "first_name": "Test"}, "date": 1800000001, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]}}, bot=None)
+    await handler.handle_update(unrelated, None)
+    assert not await ReactionRepository(database).has_recent_reaction(user_id=USER, channel_id=CHANNEL, last_x_messages=5, last_x_days=1000, now_ms=1_800_000_002_000)

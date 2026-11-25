@@ -437,3 +437,16 @@ async def test_requirements_test_access_reports_admin_status(database: Database)
     query = SimpleNamespace(edit_message_text=AsyncMock())
     await panel._test_required_chat_access(context_for(database, state, bot), state, -1005, query=query)
     assert "bot is admin" in query.edit_message_text.await_args.kwargs["text"]
+
+@pytest.mark.asyncio
+async def test_cmpchatcancel_missing_wizard_or_offer_returns_safely(database: Database) -> None:
+    configure_admin_ids((OWNER,))
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "campaign_chat_identifier", "wizard": {}, "input": {"kind": "campaign_chat"}}
+    await panel.admin_panel_callback(callback_update("m6:n:cmpchatcancel"), context_for(database, state))
+    assert state.get("wizard") is None
+    assert state.get("input") is None
+    state["wizard"] = {"chat_step": "identifier"}
+    state["input"] = {"kind": "campaign_chat"}
+    await panel.admin_panel_callback(callback_update(f"m6:{state['nonce']}:cmpchatcancel"), context_for(database, state))
+    assert state.get("wizard") is None
+    assert state.get("input") is None

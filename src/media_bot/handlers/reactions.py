@@ -19,6 +19,12 @@ class ReactionUpdateHandler:
 
     async def handle_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
+        logger.info(
+            "reaction_update_handler_entered update_id=%s has_message_reaction=%s has_channel_post=%s",
+            getattr(update, "update_id", None),
+            getattr(update, "message_reaction", None) is not None,
+            getattr(update, "channel_post", None) is not None,
+        )
         post = getattr(update, "channel_post", None)
         if post is not None:
             chat = getattr(post, "chat", None)

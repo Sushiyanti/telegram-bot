@@ -65,9 +65,16 @@ async def error_handler(
         context.application.stop_running()
         return
     if isinstance(context.error, NetworkError):
+        chain: list[str] = []
+        current: BaseException | None = context.error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen and len(chain) < 6:
+            seen.add(id(current))
+            chain.append(type(current).__name__)
+            current = current.__cause__ or current.__context__
         logger.warning(
-            "telegram_network_error update_id=%s error_type=%s; PTB polling will retry according to updater policy",
-            update_id, type(context.error).__name__,
+            "telegram_network_error update_id=%s error_chain=%s; PTB polling will retry according to updater policy",
+            update_id, "->".join(chain),
         )
         return
     if context.error is not None:

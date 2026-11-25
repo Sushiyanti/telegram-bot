@@ -4,7 +4,7 @@ Automated tests verify that identifiable `message_reaction` updates are parsed, 
 
 ## Telegram prerequisites
 
-The bot must be an administrator in the exact target channel containing the post. The configured `target_chat_id` must equal that channel's numeric ID; do not infer it from a username or accept a different channel. The bot must be running with `message_reaction` in `allowed_updates`, and the target post must be eligible under the configured `react_post`, message-count, and day-window settings.
+The bot must be an administrator in the exact target channel containing the post. The configured `target_chat_id` must equal that channel's numeric ID; do not infer it from a username or accept a different channel. The bot must be running with `message_reaction` in `allowed_updates`, and the target post must be eligible under the configured `react_post`, message-count, and day-window settings. For `any_recent`, the post must first be observed by the bot; an arbitrary historical post is not automatically eligible.
 
 ## Verification procedure
 
@@ -12,7 +12,8 @@ The bot must be an administrator in the exact target channel containing the post
 2. Create or inspect a REACT rule and record its canonical `target_chat_id` and post/window configuration.
 3. Confirm that only one polling process is using the bot token.
 4. Start the bot and watch for `reaction_update_received_raw`, followed by `reaction_update_received`, `reaction_update_persisted`, or `reaction_update_rejected`.
-5. From a normal, identifiable Telegram account, react to an eligible post in the exact target channel, then remove the reaction and replace it with another emoji.
-6. Confirm the corresponding `user_id`, channel ID, post ID, and emoji in the structured logs and verify the evaluator result changes from `missing_reaction` to passed and back after removal.
+5. After the bot is confirmed running, publish a fresh post in the exact target channel and wait for `channel_post_received`. This creates the observed-post registry entry required by `any_recent`.
+6. From a normal, identifiable Telegram account, react to that fresh post, then remove the reaction and replace it with another emoji.
+7. Confirm the corresponding `user_id`, channel ID, post ID, and emoji in the structured logs and verify the evaluator result changes from `missing_reaction` to passed and back after removal. A reaction to an unobserved historical post may be persisted for exact-post checks but must not pass `any_recent`.
 
 Anonymous channel reactions cannot be attributed to a user and must remain rejected. If no raw receipt appears, the failure is upstream of the handler: inspect bot administrator status, target channel identity, `allowed_updates`, polling conflicts, and the active network route.
