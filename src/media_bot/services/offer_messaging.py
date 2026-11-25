@@ -34,7 +34,11 @@ def render_gate_message(offer: Any, result: OfferEvaluationResult) -> tuple[str,
             keyboard.append([InlineKeyboardButton(f"Open {gate.target_label}", url=gate.url)])
 
     if result.has_misconfigured_gate:
-        lines.extend(["", "This offer is misconfigured, please contact the admin."])
+        lines.extend([
+            "",
+            "This offer is temporarily unavailable — the administrator needs to fix the required channel's join link.",
+            "Reason: misconfigured.",
+        ])
     if result.has_unavailable_gate:
         lines.extend(["", "This requirement is currently unavailable. Please try again later."])
 

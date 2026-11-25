@@ -53,7 +53,7 @@ class OfferEvaluationResult:
 
     @property
     def has_misconfigured_gate(self) -> bool:
-        return any(gate.reason == "misconfigured" for gate in self.unmet_gates)
+        return any(gate.reason in {"misconfigured", "misconfigured_admin"} for gate in self.unmet_gates)
 
 
 def _classify_chat_member(member: Any) -> tuple[bool, str | None]:
@@ -97,12 +97,12 @@ class OfferEvaluator:
             label, url = _chat_presentation(chat, chat_id)
             if chat is None:
                 gates.append(OfferGateResult(
-                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured"
+                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured_admin"
                 ))
                 continue
             if url is None:
                 gates.append(OfferGateResult(
-                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured"
+                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured_admin"
                 ))
                 continue
             try:
@@ -131,6 +131,10 @@ class OfferEvaluator:
                     channel_id=channel_id,
                     last_x_messages=int(settings.get("last_x_messages", 5)),
                     last_x_days=int(settings.get("last_x_days", 0)),
+                    required_emoji=(
+                        str(settings["reaction_emoji"])
+                        if settings.get("reaction_emoji") else None
+                    ),
                 )
                 reason = None if passed else "missing_reaction"
             except Exception:

@@ -91,9 +91,9 @@ async def test_missing_invite_url_is_misconfigured_and_renderer_has_no_broken_ur
         chat_repo=SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(title="Private group", invite_url=None))),
     )
     result = await evaluator.evaluate(OFFER.id, 99)
-    assert result.gates[0].reason == "misconfigured"
+    assert result.gates[0].reason == "misconfigured_admin"
     text, markup = render_gate_message(OFFER, result)
-    assert "misconfigured, please contact the admin" in text
+    assert "This offer is temporarily unavailable — the administrator needs to fix the required channel's join link." in text
     buttons = [button for row in markup.inline_keyboard for button in row]
     assert not any(button.url for button in buttons)
     assert any(button.callback_data == "report:7" for button in buttons)

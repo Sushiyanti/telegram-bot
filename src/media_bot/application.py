@@ -77,6 +77,15 @@ def build_application(settings: Settings) -> Application:
 
     async def post_init(application: Application) -> None:
         await AdminRepository(database).seed_configured(settings.admin_ids)
+        async with database.connection() as connection:
+            missing_rows = await (await connection.execute(
+                "SELECT chat_id FROM required_chats WHERE is_enabled = 1 AND invite_url IS NULL ORDER BY chat_id"
+            )).fetchall()
+        if missing_rows:
+            logger.warning(
+                "required_chat_invite_urls_missing chat_ids=%s",
+                [int(row[0]) for row in missing_rows],
+            )
         try:
             me = await application.bot.get_me()
             username = getattr(me, "username", None)
