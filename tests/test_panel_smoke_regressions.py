@@ -292,3 +292,70 @@ async def test_r3_existing_react_requirement_links_without_duplicate(database: D
     await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
     await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
     assert len(await OfferRequirementRepository(database).list_requirements(offer.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_requirements_batch_add_two_channels_then_done(database: Database) -> None:
+    configure_admin_ids((OWNER,))
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "required_chats"}
+    chats = {
+        "@a": SimpleNamespace(id=-1001, type="channel", username="a", title="A"),
+        "@b": SimpleNamespace(id=-1002, type="channel", username="b", title="B"),
+    }
+    bot = SimpleNamespace(get_chat=AsyncMock(side_effect=lambda identifier: chats[identifier]), edit_message_text=AsyncMock())
+    context = context_for(database, state, bot)
+    await panel._start_required_chat_input(context, state)
+    await run_message_handler(message_update("@a"), context)
+    await run_message_handler(message_update("A"), context)
+    await run_message_handler(message_update("https://t.me/a"), context)
+    await panel._start_required_chat_input(context, state)
+    await run_message_handler(message_update("@b"), context)
+    await run_message_handler(message_update("B"), context)
+    await run_message_handler(message_update("https://t.me/b"), context)
+    rows = await RequiredChatRepository(database).list_enabled()
+    assert {row.chat_id for row in rows} == {-1001, -1002}
+    assert state["required_chat_batch"] == [-1001, -1002]
+    assert "Add another" in str(bot.edit_message_text.await_args.kwargs["reply_markup"])
+
+
+@pytest.mark.asyncio
+async def test_requirements_wizard_reuses_registry_completion_without_offer_link(database: Database) -> None:
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "required_chats",
+             "input": {"kind": "required_chat"}, "wizard": {"chat_step": "invite_url", "identifier": "@shared", "display_name": "Shared"}}
+    bot = SimpleNamespace(get_chat=AsyncMock(return_value=SimpleNamespace(id=-1003, type="channel", username="shared", title="Shared")), edit_message_text=AsyncMock())
+    await panel._finish_channel_chat(context_for(database, state, bot), state)
+    assert len(await RequiredChatRepository(database).list_enabled()) == 1
+    assert await _linked_offer_count(database, -1003) == 0
+
+
+async def _linked_offer_count(database: Database, chat_id: int) -> int:
+    async with database.connection() as connection:
+        row = await (await connection.execute("SELECT COUNT(*) FROM offer_required_chats WHERE chat_id = ?", (chat_id,))).fetchone()
+    return int(row[0])
+
+
+@pytest.mark.asyncio
+async def test_requirements_remove_warns_for_two_offers_then_unlinks(database: Database) -> None:
+    first, second = await make_offer(database, "remove-a"), await make_offer(database, "remove-b")
+    chat_id = -1004
+    await RequiredChatRepository(database).upsert(RequiredChat(chat_id, "channel", "Shared", "shared", True, 1, 1, "https://t.me/shared"))
+    repo = OfferRequirementRepository(database)
+    await repo.add_required_chat(first.id, chat_id)
+    await repo.add_required_chat(second.id, chat_id)
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "required_chats"}
+    query = SimpleNamespace(edit_message_text=AsyncMock())
+    context = context_for(database, state, SimpleNamespace())
+    await panel._begin_required_chat_remove(context, state, chat_id, query=query)
+    assert "required by 2 offers" in query.edit_message_text.await_args.kwargs["text"]
+    await panel._remove_required_chat(context, state, chat_id, query=query)
+    assert await _linked_offer_count(database, chat_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_requirements_test_access_reports_admin_status(database: Database) -> None:
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77, "closed": False, "view": "required_chats"}
+    await RequiredChatRepository(database).upsert(RequiredChat(-1005, "channel", "Access", "access", True, 1, 1, "https://t.me/access"))
+    bot = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(id=999)), get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")), edit_message_text=AsyncMock())
+    query = SimpleNamespace(edit_message_text=AsyncMock())
+    await panel._test_required_chat_access(context_for(database, state, bot), state, -1005, query=query)
+    assert "bot is admin" in query.edit_message_text.await_args.kwargs["text"]

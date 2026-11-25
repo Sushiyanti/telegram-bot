@@ -364,7 +364,7 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         raise ApplicationHandlerStop
 
-    if pending.get("kind") == "campaign_chat":
+    if pending.get("kind") in {"campaign_chat", "required_chat"}:
         wizard = state.get("wizard")
         value = getattr(message, "text", None)
         value = value.strip() if isinstance(value, str) else ""
@@ -375,11 +375,11 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if step == "identifier":
             wizard["identifier"] = _chat_identifier(value)
             wizard["chat_step"] = "display_name"
-            await _show_campaign_chat_name(context, state)
+            await _show_channel_chat_name(context, state)
         elif step == "display_name":
             wizard["display_name"] = value
             wizard["chat_step"] = "invite_url"
-            await _show_campaign_chat_invite(context, state)
+            await _show_channel_chat_invite(context, state)
         elif step == "invite_url":
             try:
                 wizard["invite_url"] = validate_telegram_link(value)
@@ -387,7 +387,7 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await _edit_panel(context, state, "Send a valid Telegram invite URL, or press Skip.", _markup([[_button("Skip", state, "cmpchat_skipurl")], [_button("Cancel", state, "cmpchatcancel")]]))
                 raise ApplicationHandlerStop
             try:
-                await _finish_campaign_chat(context, state)
+                await _finish_channel_chat(context, state)
             except (InvalidRecord, RecordNotFound) as exc:
                 logger.exception("campaign_chat_wizard_failed")
                 _clear_pending_flow(state)
@@ -774,6 +774,34 @@ async def _dispatch_callback(
         await _show_requirement_scopes(context, state, _int_arg(args, 0, 0), query=query)
     elif action == "reqpage":
         await _show_requirement_scopes(context, state, _int_arg(args, 0), query=query)
+    elif action == "reqchannels":
+        await _show_required_chats(context, state, query=query)
+    elif action == "reqchatadd":
+        await _start_required_chat_input(context, state, query=query)
+    elif action == "reqchat_skipname":
+        await _required_chat_skip_name(context, state, query=query)
+    elif action == "reqchat_skipurl":
+        await _required_chat_skip_url(context, state, query=query)
+    elif action == "reqchatcancel":
+        _clear_pending_flow(state)
+        state.pop("required_chat_batch", None)
+        await _show_required_chats(context, state, query=query, notice="Channel setup cancelled.")
+    elif action == "reqchat_done":
+        _clear_pending_flow(state)
+        state.pop("required_chat_batch", None)
+        await _show_required_chats(context, state, query=query)
+    elif action == "reqchat_more":
+        await _start_required_chat_input(context, state, query=query)
+    elif action == "reqchat_edit":
+        await _start_required_chat_edit(context, state, _int_arg(args, 0), query=query)
+    elif action == "reqchat_remove":
+        await _begin_required_chat_remove(context, state, _int_arg(args, 0), query=query)
+    elif action == "reqchat_remove_do":
+        await _remove_required_chat(context, state, _int_arg(args, 0), query=query)
+    elif action == "reqchat_remove_cancel":
+        await _show_required_chats(context, state, query=query)
+    elif action == "reqchat_test":
+        await _test_required_chat_access(context, state, _int_arg(args, 0), query=query)
     elif action == "reqscope":
         await _show_requirements(context, state, _scope_from_arg(args, 0), query=query)
     elif action == "reqadd":
@@ -1100,6 +1128,7 @@ async def _show_requirement_scopes(
     rows = [[_button(name[:64], state, "reqscope", "g" if category_id is None else category_id)] for name, category_id in visible]
     if pages > 1:
         rows.append(_page_row(state, "reqpage", page, pages))
+    rows.append([_button("Required channels", state, "reqchannels"), _button("Add channel(s)", state, "reqchatadd")])
     rows.append([_button("Main Menu", state, "home")])
     await _edit_panel(context, state, f"Requirements — select a scope ({page + 1}/{pages})", _markup(rows), query=query)
 
@@ -1177,7 +1206,10 @@ async def _start_requirement_input(
 
 def _input_markup(state: dict[str, Any]) -> InlineKeyboardMarkup:
     wizard = state.get("wizard")
-    action = "cmpchatcancel" if isinstance(wizard, dict) and wizard.get("chat_step") else "rule_cancel" if isinstance(wizard, dict) else "inputcancel"
+    if isinstance(wizard, dict) and wizard.get("chat_step"):
+        action = "reqchatcancel" if state.get("input", {}).get("kind") == "required_chat" else "cmpchatcancel"
+    else:
+        action = "rule_cancel" if isinstance(wizard, dict) else "inputcancel"
     return _markup([[_button("Cancel", state, action)]])
 
 
@@ -2006,6 +2038,124 @@ async def _show_campaign_chat_picker(context: ContextTypes.DEFAULT_TYPE, state: 
     rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose a required channel or group.", _markup(rows), query=query)
 
 
+async def _required_chat_offer_count(database: Database, chat_id: int) -> int:
+    async with database.connection() as connection:
+        row = await (await connection.execute(
+            "SELECT COUNT(*) FROM offer_required_chats WHERE chat_id = ?", (chat_id,)
+        )).fetchone()
+    return int(row[0])
+
+
+def _required_chat_url_status(chat: RequiredChat) -> str:
+    if not chat.invite_url:
+        return "none"
+    if chat.username and chat.invite_url.rstrip("/").casefold() == f"https://t.me/{chat.username}".casefold():
+        return "derived"
+    return "present"
+
+
+async def _show_required_chats(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+    notice: str | None = None,
+) -> None:
+    chats = await RequiredChatRepository(_database(context)).list_enabled()
+    lines = ["Required channels and groups"]
+    rows: list[list[InlineKeyboardButton]] = []
+    if not chats:
+        lines.append("No channels registered yet.")
+    for chat in chats:
+        count = await _required_chat_offer_count(_database(context), chat.chat_id)
+        label = chat.title or (f"@{chat.username}" if chat.username else str(chat.chat_id))
+        lines.append(f"{label} · {chat.chat_id} · URL: {_required_chat_url_status(chat)} · offers: {count}")
+        rows.append([
+            _button("Edit", state, "reqchat_edit", chat.chat_id),
+            _button("Remove", state, "reqchat_remove", chat.chat_id),
+            _button("Test access", state, "reqchat_test", chat.chat_id),
+        ])
+    if notice:
+        lines.insert(0, notice)
+    batch = state.get("required_chat_batch")
+    if isinstance(batch, list):
+        rows.append([_button("Add another", state, "reqchat_more"), _button("Done", state, "reqchat_done")])
+    else:
+        rows.append([_button("Add channel(s)", state, "reqchatadd")])
+    rows.append([_button("‹ Requirements", state, "requirements", 0)])
+    state.update({"view": "required_chats", "input": None})
+    await _edit_panel(context, state, "\n".join(lines), _markup(rows), query=query)
+
+
+async def _start_required_chat_input(
+    context: ContextTypes.DEFAULT_TYPE,
+    state: dict[str, Any],
+    *,
+    query: Any = None,
+    chat: RequiredChat | None = None,
+) -> None:
+    if "required_chat_batch" not in state:
+        state["required_chat_batch"] = []
+    wizard: dict[str, Any] = {"chat_step": "identifier"}
+    if chat is not None:
+        wizard.update({
+            "identifier": f"@{chat.username}" if chat.username else str(chat.chat_id),
+            "display_name": chat.title,
+            "invite_url": chat.invite_url,
+            "edit_chat_id": chat.chat_id,
+            "chat_step": "display_name",
+        })
+    state["wizard"] = wizard
+    state["input"] = {"kind": "required_chat"}
+    state["view"] = "required_chat_identifier"
+    _touch_pending_flow(state)
+    prompt = "Send the channel @username, t.me link, or -100... id."
+    if chat is not None:
+        await _show_channel_chat_name(context, state)
+    else:
+        await _edit_panel(context, state, prompt, _input_markup(state), query=query)
+
+
+async def _start_required_chat_edit(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], chat_id: int, *, query: Any = None) -> None:
+    chat = next((item for item in await RequiredChatRepository(_database(context)).list_enabled() if item.chat_id == chat_id), None)
+    if chat is None:
+        await _show_required_chats(context, state, query=query, notice="Channel no longer exists.")
+        return
+    await _start_required_chat_input(context, state, query=query, chat=chat)
+
+
+async def _begin_required_chat_remove(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], chat_id: int, *, query: Any = None) -> None:
+    chat = next((item for item in await RequiredChatRepository(_database(context)).list_enabled() if item.chat_id == chat_id), None)
+    if chat is None:
+        await _show_required_chats(context, state, query=query, notice="Channel no longer exists.")
+        return
+    count = await _required_chat_offer_count(_database(context), chat_id)
+    if count == 0:
+        await _remove_required_chat(context, state, chat_id, query=query)
+        return
+    label = chat.title or str(chat_id)
+    await _edit_panel(context, state, f"{label} is required by {count} offers. Removing it will unlink it from all of them.", _markup([[_button(f"Remove from all {count}", state, "reqchat_remove_do", chat_id)], [_button("Cancel", state, "reqchat_remove_cancel")]]), query=query)
+
+
+async def _remove_required_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], chat_id: int, *, query: Any = None) -> None:
+    async with _database(context).connection() as connection:
+        await connection.execute("DELETE FROM offer_required_chats WHERE chat_id = ?", (chat_id,))
+        await connection.execute("UPDATE required_chats SET is_enabled = 0, updated_at_ms = ? WHERE chat_id = ?", (int(time.time() * 1000), chat_id))
+    await _show_required_chats(context, state, query=query, notice="Channel removed and unlinked from all offers.")
+
+
+async def _test_required_chat_access(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], chat_id: int, *, query: Any = None) -> None:
+    try:
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(chat_id, int(me.id))
+        status = str(getattr(member, "status", ""))
+        ok = status in {"administrator", "creator"}
+    except Exception:
+        ok = False
+    notice = "✓ bot is admin" if ok else "✗ bot is not admin in this channel — verification will fail."
+    await _show_required_chats(context, state, query=query, notice=notice)
+
+
 async def _start_campaign_chat_input(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
     state["wizard"] = {"offer_id": offer_id, "chat_step": "identifier"}
     state["input"] = {"kind": "campaign_chat"}
@@ -2015,11 +2165,31 @@ async def _start_campaign_chat_input(context: ContextTypes.DEFAULT_TYPE, state: 
 
 
 async def _show_campaign_chat_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
-    await _edit_panel(context, state, "Send a display name (or press Skip to use the username).", _markup([[_button("Skip", state, "cmpchat_skipname")], [_button("Cancel", state, "cmpchatcancel")]]))
+    await _show_channel_chat_name(context, state)
 
 
 async def _show_campaign_chat_invite(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
-    await _edit_panel(context, state, "Send the invite URL (t.me/+... or t.me/... ), or Skip to derive from username.", _markup([[_button("Skip", state, "cmpchat_skipurl")], [_button("Cancel", state, "cmpchatcancel")]]))
+    await _show_channel_chat_invite(context, state)
+
+
+async def _show_channel_chat_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
+    prefix = "reqchat" if state.get("input", {}).get("kind") == "required_chat" else "cmpchat"
+    cancel = "reqchatcancel" if prefix == "reqchat" else "cmpchatcancel"
+    current = state.get("wizard", {}).get("display_name") if isinstance(state.get("wizard"), dict) else None
+    prompt = "Send a display name (or press Skip to use the channel title/username)."
+    if current:
+        prompt = f"Current display name: {current}\nSend a replacement, or press Skip to keep it."
+    await _edit_panel(context, state, prompt, _markup([[_button("Skip", state, f"{prefix}_skipname")], [_button("Cancel", state, cancel)]]))
+
+
+async def _show_channel_chat_invite(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any]) -> None:
+    prefix = "reqchat" if state.get("input", {}).get("kind") == "required_chat" else "cmpchat"
+    cancel = "reqchatcancel" if prefix == "reqchat" else "cmpchatcancel"
+    current = state.get("wizard", {}).get("invite_url") if isinstance(state.get("wizard"), dict) else None
+    prompt = "Send the invite URL (t.me/+... or t.me/... ), or Skip to derive from username."
+    if current:
+        prompt = f"Current invite URL: {current}\nSend a replacement, or press Skip to keep it."
+    await _edit_panel(context, state, prompt, _markup([[_button("Skip", state, f"{prefix}_skipurl")], [_button("Cancel", state, cancel)]]))
 
 
 async def _campaign_chat_skip_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
@@ -2027,11 +2197,23 @@ async def _campaign_chat_skip_name(context: ContextTypes.DEFAULT_TYPE, state: di
     if not isinstance(wizard, dict):
         raise InvalidRecord("channel setup is incomplete")
     wizard["chat_step"] = "invite_url"
-    await _show_campaign_chat_invite(context, state)
+    await _show_channel_chat_invite(context, state)
 
 
 async def _campaign_chat_skip_url(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
-    await _finish_campaign_chat(context, state, query=query)
+    await _finish_channel_chat(context, state, query=query)
+
+
+async def _required_chat_skip_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    wizard = state.get("wizard")
+    if not isinstance(wizard, dict):
+        raise InvalidRecord("channel setup is incomplete")
+    wizard["chat_step"] = "invite_url"
+    await _show_channel_chat_invite(context, state)
+
+
+async def _required_chat_skip_url(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    await _finish_channel_chat(context, state, query=query)
 
 
 def _chat_identifier(value: str) -> str:
@@ -2042,7 +2224,7 @@ def _chat_identifier(value: str) -> str:
     return value if value.startswith("@") or value.startswith("-") else "@" + value
 
 
-async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+async def _finish_channel_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
     wizard = state.get("wizard")
     if not isinstance(wizard, dict):
         raise InvalidRecord("channel setup is incomplete")
@@ -2064,6 +2246,15 @@ async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
     existing = next((row for row in await RequiredChatRepository(_database(context)).list_enabled() if row.chat_id == int(chat.id)), None)
     name_changed = existing is not None and existing.title != title
     await RequiredChatRepository(_database(context)).upsert(RequiredChat(chat_id=int(chat.id), chat_type=chat_type, title=title, username=username, invite_url=invite_url))
+    kind = state.get("input", {}).get("kind")
+    if kind == "required_chat":
+        added = state.setdefault("required_chat_batch", [])
+        if int(chat.id) not in added:
+            added.append(int(chat.id))
+        state["wizard"] = None
+        state["input"] = None
+        await _show_required_chats(context, state, query=query, notice=f"✓ {title} added.")
+        return
     linked = await OfferRequirementRepository(_database(context)).add_required_chat(int(wizard["offer_id"]), int(chat.id))
     offer_id = int(wizard["offer_id"])
     _clear_pending_flow(state)
@@ -2072,6 +2263,11 @@ async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
         if name_changed else "That channel is already required for this offer."
     )
     await _show_campaign(context, state, offer_id, query=query, notice=notice)
+
+
+async def _finish_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    """Backward-compatible Campaigns entry point for the shared channel wizard."""
+    await _finish_channel_chat(context, state, query=query)
 
 
 async def _add_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, chat_id: int, *, query: Any = None) -> None:
