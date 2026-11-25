@@ -302,6 +302,7 @@ async def test_r4_campaign_react_creation_is_offer_scoped_not_global(database: D
                  "offer_id": offer.id, "campaign_offer_id": offer.id, "type": "REACT",
                  "target": -1001, "is_fake": True, "wait_seconds": 0,
                  "last_x_messages": 5, "last_x_days": 0, "link_url": "https://t.me/one",
+                 "react_post": "any_recent", "reaction_emoji": "👍",
              }}
     await panel._save_rule(context_for(database, state, SimpleNamespace()), state)
     rows = await OfferRequirementRepository(database).list_requirements(offer.id)
@@ -311,6 +312,64 @@ async def test_r4_campaign_react_creation_is_offer_scoped_not_global(database: D
             "SELECT COUNT(*) FROM category_requirements WHERE requirement_id = ?", (rows[0].requirement_id,)
         )
         assert int((await cursor.fetchone())[0]) == 0
+
+
+@pytest.mark.asyncio
+async def test_c1_reply_new_opens_campaign_scoped_screen(database: Database) -> None:
+    offer = await make_offer(database, "c1")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77,
+             "closed": False, "view": "campaign", "input": {"kind": "campaign_requirement_new"},
+             "wizard": {"offer_id": offer.id}}
+    bot = SimpleNamespace(edit_message_text=AsyncMock())
+    await run_message_handler(message_update("new"), context_for(database, state, bot))
+    text = bot.edit_message_text.await_args.kwargs["text"]
+    assert "Global" not in text
+    assert "Add a rule to this campaign" in text
+
+
+@pytest.mark.asyncio
+async def test_c2_campaign_react_save_has_offer_link_and_required_fields(database: Database) -> None:
+    offer = await make_offer(database, "c2")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77,
+             "closed": False, "view": "campaign", "wizard": {
+                 "offer_id": offer.id, "campaign_offer_id": offer.id, "type": "REACT",
+                 "target": -1001, "react_post": "any_recent", "reaction_emoji": "👍",
+                 "is_fake": False, "wait_seconds": 0, "last_x_messages": 5,
+                 "last_x_days": 0, "link_url": "https://t.me/one",
+             }}
+    await panel._save_rule(context_for(database, state, SimpleNamespace()), state)
+    linked = await OfferRequirementRepository(database).list_requirements(offer.id)
+    assert len(linked) == 1
+    async with database.connection() as connection:
+        row = await (await connection.execute("SELECT settings_json FROM requirements WHERE id = ?", (linked[0].requirement_id,))).fetchone()
+        assert "react_post" in row[0] and "reaction_emoji" in row[0]
+        assert int((await (await connection.execute("SELECT COUNT(*) FROM category_requirements WHERE requirement_id = ?", (linked[0].requirement_id,))).fetchone())[0]) == 0
+
+
+@pytest.mark.asyncio
+async def test_c3_empty_campaign_react_emoji_is_rejected_without_row(database: Database) -> None:
+    offer = await make_offer(database, "c3")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77,
+             "closed": False, "view": "campaign", "wizard": {"offer_id": offer.id,
+             "campaign_offer_id": offer.id, "type": "REACT", "target": -1001,
+             "react_post": "any_recent", "reaction_emoji": "", "is_fake": False,
+             "wait_seconds": 0, "last_x_messages": 5, "last_x_days": 0}}
+    with pytest.raises(Exception, match="reaction emoji"):
+        await panel._save_rule(context_for(database, state, SimpleNamespace()), state)
+    assert await RequirementRepository(database).list_all() == ()
+
+
+@pytest.mark.asyncio
+async def test_c4_empty_campaign_react_target_is_rejected_without_row(database: Database) -> None:
+    offer = await make_offer(database, "c4")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77,
+             "closed": False, "view": "campaign", "wizard": {"offer_id": offer.id,
+             "campaign_offer_id": offer.id, "type": "REACT", "target": "",
+             "react_post": "any_recent", "reaction_emoji": "👍", "is_fake": False,
+             "wait_seconds": 0, "last_x_messages": 5, "last_x_days": 0}}
+    with pytest.raises(Exception, match="target channel"):
+        await panel._save_rule(context_for(database, state, SimpleNamespace()), state)
+    assert await RequirementRepository(database).list_all() == ()
 
 
 @pytest.mark.asyncio

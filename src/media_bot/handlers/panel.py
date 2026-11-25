@@ -403,8 +403,7 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await _edit_panel(context, state, "Reply 'new' to create a REACT requirement, or press Cancel.", _input_markup(state))
             raise ApplicationHandlerStop
         offer_id = int(wizard["offer_id"])
-        await _start_requirement_input(context, state, None)
-        state["wizard"]["campaign_offer_id"] = offer_id
+        await _start_requirement_input(context, state, None, offer_id=offer_id)
         raise ApplicationHandlerStop
 
     if pending.get("kind") == "campaign_title":
@@ -535,6 +534,52 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             raise ApplicationHandlerStop
         wizard["target"] = target
         wizard["link_url"] = _forwarded_target_url(message, rule_type)
+        state["input"] = None
+        if rule_type == "REACT":
+            state["input"] = {"kind": "react_post"}
+            wizard["step"] = "react_post"
+            await _edit_panel(
+                context, state,
+                "Send the target post URL or message ID, or type 'any recent'.",
+                _input_markup(state),
+            )
+            raise ApplicationHandlerStop
+        await _show_rule_link(context, state)
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "react_post":
+        wizard = _require_rule_wizard(state)
+        value = getattr(message, "text", None)
+        value = value.strip() if isinstance(value, str) else ""
+        if not value:
+            await _edit_panel(context, state, "Target post is required: send a post URL, message ID, or 'any recent'.", _input_markup(state))
+            raise ApplicationHandlerStop
+        if value.casefold() == "any recent":
+            wizard["react_post"] = "any_recent"
+        elif value.isdigit() and int(value) > 0:
+            wizard["react_post"] = value
+        else:
+            try:
+                wizard["react_post"] = validate_telegram_link(value)
+            except InvalidRecord:
+                await _edit_panel(context, state, "Target post is required: send a valid Telegram post URL, message ID, or 'any recent'.", _input_markup(state))
+                raise ApplicationHandlerStop
+        state["input"] = {"kind": "react_emoji"}
+        wizard["step"] = "react_emoji"
+        await _edit_panel(context, state, "Send the single reaction emoji required for this post.", _input_markup(state))
+        raise ApplicationHandlerStop
+
+    if pending.get("kind") == "react_emoji":
+        wizard = _require_rule_wizard(state)
+        value = getattr(message, "text", None)
+        value = value.strip() if isinstance(value, str) else ""
+        try:
+            from media_bot.db.rules import _validate_reaction_emoji
+            _validate_reaction_emoji(value)
+        except InvalidRecord:
+            await _edit_panel(context, state, "Reaction emoji is required and must be a single emoji.", _input_markup(state))
+            raise ApplicationHandlerStop
+        wizard["reaction_emoji"] = value
         state["input"] = None
         await _show_rule_link(context, state)
         raise ApplicationHandlerStop
@@ -827,10 +872,7 @@ async def _dispatch_callback(
         await _select_rule_type(context, state, _str_arg(args, 0), query=query)
     elif action == "cmpreqnew":
         offer_id = _int_arg(args, 0)
-        state["wizard"] = {"offer_id": offer_id, "campaign_offer_id": offer_id}
-        state["input"] = None
-        await _start_requirement_input(context, state, None)
-        state["wizard"]["campaign_offer_id"] = offer_id
+        await _start_requirement_input(context, state, None, offer_id=offer_id)
     elif action == "rule_link_edit":
         await _start_rule_link_input(context, state, query=query)
     elif action == "rule_link_continue":
@@ -1178,8 +1220,9 @@ async def _start_requirement_input(
     category_id: int | None,
     *,
     query: Any = None,
+    offer_id: int | None = None,
 ) -> None:
-    category_name = "Global"
+    category_name = "Global" if offer_id is None else "this campaign"
     if category_id is not None:
         category = await CategoryRepository(_database(context)).get(category_id)
         if category is None:
@@ -1191,7 +1234,12 @@ async def _start_requirement_input(
         "scope_id": category_id,
         "scope_name": category_name,
         "input": None,
-        "wizard": {"category_id": category_id, "scope_name": category_name, "step": "type"},
+        "wizard": {
+            "category_id": category_id,
+            "scope_name": category_name,
+            "step": "type",
+            **({"campaign_offer_id": int(offer_id)} if offer_id is not None else {}),
+        },
     })
     _touch_pending_flow(state)
     rows = [
@@ -1531,6 +1579,17 @@ async def _save_rule(
 ) -> None:
     wizard = _require_rule_wizard(state)
     rule_type = str(wizard["type"])
+    campaign_offer_id = wizard.get("campaign_offer_id")
+    if campaign_offer_id is not None and rule_type == "REACT":
+        missing = []
+        if not isinstance(wizard.get("target"), (int, str)) or not str(wizard.get("target")).strip():
+            missing.append("target channel")
+        if not isinstance(wizard.get("react_post"), str) or not wizard.get("react_post").strip():
+            missing.append("target post")
+        if not isinstance(wizard.get("reaction_emoji"), str) or not wizard.get("reaction_emoji").strip():
+            missing.append("reaction emoji")
+        if missing:
+            raise InvalidRecord("Missing required REACT field: " + ", ".join(missing))
     created = await RequirementRepository(_database(context)).create(
         category_id=wizard.get("category_id"),
         requirement_type=rule_type,
@@ -1540,7 +1599,9 @@ async def _save_rule(
         last_x_messages=int(wizard.get("last_x_messages", 5)) if rule_type == "REACT" else None,
         last_x_days=int(wizard.get("last_x_days", 0)) if rule_type == "REACT" else None,
         link_url=wizard.get("link_url") if isinstance(wizard.get("link_url"), str) else None,
-        attach_scope=wizard.get("campaign_offer_id") is None,
+        attach_scope=campaign_offer_id is None,
+        react_post=wizard.get("react_post") if rule_type == "REACT" else None,
+        reaction_emoji=wizard.get("reaction_emoji") if rule_type == "REACT" else None,
     )
     category_id = wizard.get("category_id")
     scope_name = str(wizard.get("scope_name", "Global"))
@@ -1551,7 +1612,6 @@ async def _save_rule(
         str(created.id),
         target_type="requirement",
     )
-    campaign_offer_id = wizard.get("campaign_offer_id")
     if campaign_offer_id is not None:
         linked = await OfferRequirementRepository(_database(context)).add_requirement(int(campaign_offer_id), created.id)
         _clear_pending_flow(state)
@@ -2020,12 +2080,20 @@ async def _show_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, An
     offer = await OfferRepository(_database(context)).get_by_id(offer_id)
     if offer is None: raise RecordNotFound("campaign does not exist")
     repo = OfferRequirementRepository(_database(context)); chats = await repo.list_required_chats(offer_id); reqs = await repo.list_requirements(offer_id)
+    registry = {chat.chat_id: chat for chat in await RequiredChatRepository(_database(context)).list_enabled()}
+    chat_records = [registry.get(chat.chat_id) for chat in chats]
     username = _panel_bot_username(context)
     link = (f"https://t.me/{username}?start={offer.slug_plain}" if username and offer.slug_plain
             else "(bot username not configured)" if offer.slug_plain
             else "Link not retrievable — backfilled from legacy token; existing circulating link continues to work")
+    missing_urls = sum(1 for chat in chat_records if chat is None or not chat.invite_url)
     warning = "\n⚠ This offer has no requirements — files will be delivered freely to anyone who opens the link." if offer.is_enabled and not chats and not reqs else ""
-    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{link}{warning}"
+    if missing_urls:
+        warning += f"\n⚠ {missing_urls} required channel{'s' if missing_urls != 1 else ''} has no join link — /fixinvites will resolve it."
+    channel_lines = "\n".join(
+        f"Channel {chat.chat_id}: invite_url={_required_chat_url_status(registry[chat.chat_id]) if chat.chat_id in registry else 'none'}" for chat in chats
+    )
+    text = (notice + "\n" if notice else "") + f"{offer.title}\nItem: {offer.item_id}\nStatus: {'enabled' if offer.is_enabled else 'disabled'}\nChannels: {len(chats)} · Requirements: {len(reqs)}\n{channel_lines}\n{link}{warning}"
     rows = [[_button("Disable" if offer.is_enabled else "Enable", state, "cmpdisable" if offer.is_enabled else "cmpenable", offer_id)], [_button("Edit title", state, "cmpedit_title", offer_id), _button("Edit description", state, "cmpedit_desc", offer_id)], [_button("Add channel", state, "cmpaddchat", offer_id)], [_button("Add requirement", state, "cmpaddreq", offer_id)]]
     rows.extend([[_button(f"Remove channel {chat.chat_id}", state, "cmrc", offer_id, chat.chat_id)] for chat in chats])
     rows.extend([[_button(f"Remove requirement {req.requirement_id}", state, "cmrr", offer_id, req.requirement_id)] for req in reqs])

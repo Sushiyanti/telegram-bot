@@ -556,7 +556,7 @@ async def test_rule_target_is_extracted_from_forwarded_channel_or_user(
     await _send_expected_panel_input(context, inbound)
 
     assert state["wizard"]["target"] == expected_id
-    assert state["view"] == "rule_wizard_link"
+    assert state["view"] == ("rule_wizard_target" if rule_type == "REACT" else "rule_wizard_link")
 
 
 @pytest.mark.parametrize(

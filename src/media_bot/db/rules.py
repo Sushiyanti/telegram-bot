@@ -242,6 +242,8 @@ class RequirementRepository:
         last_x_days: int | None = None,
         link_url: str | None = None,
         attach_scope: bool = True,
+        react_post: str | None = None,
+        reaction_emoji: str | None = None,
     ) -> Requirement:
         requirement_type = str(requirement_type).upper()
         if requirement_type not in _REQUIREMENT_TYPES:
@@ -269,6 +271,12 @@ class RequirementRepository:
             _bounded_int(messages, 0, _MAX_LAST_MESSAGES, "last_x_messages")
             _bounded_int(days, 0, _MAX_LAST_DAYS, "last_x_days")
             settings.update({"last_x_messages": messages, "last_x_days": days})
+            if react_post is not None:
+                _validate_text(react_post.strip(), "react_post", max_length=512)
+                settings["react_post"] = react_post.strip()
+            if reaction_emoji is not None:
+                _validate_reaction_emoji(reaction_emoji)
+                settings["reaction_emoji"] = reaction_emoji.strip()
         elif last_x_messages is not None or last_x_days is not None:
             raise InvalidRecord("REACT window settings can only be used with REACT")
         created_at_ms = _now_ms()
@@ -557,6 +565,7 @@ class ReactionRepository:
         last_x_messages: int,
         last_x_days: int,
         now_ms: int | None = None,
+        required_emoji: str | None = None,
     ) -> bool:
         _positive_id(user_id, "user_id")
         _chat_id(channel_id, "channel_id")
@@ -567,25 +576,33 @@ class ReactionRepository:
         since_ms = 0 if last_x_days == 0 else now - last_x_days * 86_400_000
         async with self.database.connection() as connection:
             if last_x_messages == 0:
+                emoji_clause = " AND reactions.emoji = ?" if required_emoji else ""
+                params: tuple[object, ...] = (channel_id, since_ms, user_id)
+                if required_emoji:
+                    params += (required_emoji,)
                 cursor = await connection.execute(
-                    """SELECT 1 FROM user_reactions AS reactions
+                    f"""SELECT 1 FROM user_reactions AS reactions
                        JOIN observed_channel_posts AS posts
                          ON posts.channel_id = reactions.channel_id
                         AND posts.message_id = reactions.message_id
                        WHERE posts.channel_id = ? AND posts.posted_at_ms >= ?
-                         AND reactions.user_id = ? LIMIT 1""",
-                    (channel_id, since_ms, user_id),
+                         AND reactions.user_id = ?{emoji_clause} LIMIT 1""",
+                    params,
                 )
             else:
+                emoji_clause = " AND reactions.emoji = ?" if required_emoji else ""
+                params = (channel_id, since_ms, last_x_messages, user_id, channel_id)
+                if required_emoji:
+                    params += (required_emoji,)
                 cursor = await connection.execute(
-                    """SELECT 1 FROM user_reactions AS reactions
+                    f"""SELECT 1 FROM user_reactions AS reactions
                        JOIN (
                            SELECT message_id FROM observed_channel_posts
                            WHERE channel_id = ? AND posted_at_ms >= ?
                            ORDER BY posted_at_ms DESC, message_id DESC LIMIT ?
                        ) AS recent ON recent.message_id = reactions.message_id
-                       WHERE reactions.user_id = ? AND reactions.channel_id = ? LIMIT 1""",
-                    (channel_id, since_ms, last_x_messages, user_id, channel_id),
+                       WHERE reactions.user_id = ? AND reactions.channel_id = ?{emoji_clause} LIMIT 1""",
+                    params,
                 )
             return await cursor.fetchone() is not None
 
@@ -672,6 +689,14 @@ def validate_telegram_link(value: object) -> str | None:
 def _emoji_key(value: str) -> str:
     _validate_text(value, "emoji", max_length=128)
     return value
+
+
+def _validate_reaction_emoji(value: str) -> str:
+    import unicodedata
+    clean = value.strip() if isinstance(value, str) else ""
+    if not clean or len(clean) > 8 or any(unicodedata.category(ch)[0] not in {"S", "C"} for ch in clean):
+        raise InvalidRecord("reaction emoji is required and must be a single emoji")
+    return clean
 
 
 def _positive_id(value: int, field: str) -> None:
