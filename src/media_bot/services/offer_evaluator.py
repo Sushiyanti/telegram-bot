@@ -141,7 +141,12 @@ class OfferEvaluator:
             target_id = _target_id(requirement)
             settings = getattr(requirement, "settings", {}) or {}
             try:
-                channel_id = int(getattr(requirement, "target"))
+                canonical_channel_id = getattr(requirement, "target_chat_id", None)
+                channel_id = int(
+                    canonical_channel_id
+                    if canonical_channel_id is not None
+                    else getattr(requirement, "target")
+                )
                 logger.info(
                     "offer_requirement_evaluation offer_id=%s user_id=%s requirement_id=%s type=REACT channel_id=%s mode=%s",
                     offer_id, user_id, getattr(requirement, "id", None), channel_id,
@@ -237,7 +242,12 @@ def _chat_presentation(chat: Any, chat_id: int) -> tuple[str, str | None]:
 
 def _target_id(requirement: Any) -> int | None:
     try:
-        return int(getattr(requirement, "target"))
+        canonical_channel_id = getattr(requirement, "target_chat_id", None)
+        return int(
+            canonical_channel_id
+            if canonical_channel_id is not None
+            else getattr(requirement, "target")
+        )
     except (TypeError, ValueError):
         return None
 

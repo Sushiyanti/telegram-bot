@@ -811,9 +811,15 @@ async def _dispatch_callback(
         await _campaign_chat_skip_url(context, state, query=query)
     elif action == "cmpchatcancel":
         wizard = state.get("wizard")
-        if not isinstance(wizard, dict):
-            raise InvalidRecord("channel setup is incomplete")
-        await _show_campaign(context, state, int(wizard["offer_id"]), query=query)
+        offer_id = wizard.get("offer_id") if isinstance(wizard, dict) else None
+        _clear_pending_flow(state)
+        if isinstance(offer_id, int) and offer_id > 0:
+            await _show_campaign(context, state, offer_id, query=query, notice="Channel setup cancelled.")
+        else:
+            await _show_campaigns(
+                context, state, 0, query=query,
+                notice="The channel setup expired; no campaign context was available.",
+            )
     elif action == "cmpchat":
         await _add_campaign_chat(context, state, _int_arg(args, 0), _int_arg(args, 1), query=query)
     elif action == "cmrc":
@@ -2338,12 +2344,18 @@ async def _show_channel_chat_invite(context: ContextTypes.DEFAULT_TYPE, state: d
 async def _campaign_chat_skip_name(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
     wizard = state.get("wizard")
     if not isinstance(wizard, dict):
-        raise InvalidRecord("channel setup is incomplete")
+        _clear_pending_flow(state)
+        await _show_campaigns(context, state, 0, query=query, notice="The channel setup expired.")
+        return
     wizard["chat_step"] = "invite_url"
     await _show_channel_chat_invite(context, state)
 
 
 async def _campaign_chat_skip_url(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], *, query: Any = None) -> None:
+    if not isinstance(state.get("wizard"), dict) or not isinstance(state["wizard"].get("offer_id"), int):
+        _clear_pending_flow(state)
+        await _show_campaigns(context, state, 0, query=query, notice="The channel setup expired.")
+        return
     await _finish_channel_chat(context, state, query=query)
 
 

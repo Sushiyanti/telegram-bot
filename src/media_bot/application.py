@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
-from telegram.error import Conflict
+from telegram.error import Conflict, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -63,6 +63,12 @@ async def error_handler(
             __import__("os").getpid(),
         )
         context.application.stop_running()
+        return
+    if isinstance(context.error, NetworkError):
+        logger.warning(
+            "telegram_network_error update_id=%s error_type=%s; PTB polling will retry according to updater policy",
+            update_id, type(context.error).__name__,
+        )
         return
     if context.error is not None:
         try:

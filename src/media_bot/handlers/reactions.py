@@ -42,6 +42,10 @@ class ReactionUpdateHandler:
             return
         user = getattr(change, "user", None)
         chat = getattr(change, "chat", None)
+        logger.info(
+            "reaction_update_received_raw identifiable_user=%s channel_id=%s message_id=%s",
+            user is not None, getattr(chat, "id", None), getattr(change, "message_id", None),
+        )
         if user is None or chat is None:
             # Anonymous reactions do not identify an individual user.
             logger.info(

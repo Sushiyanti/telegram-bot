@@ -31,6 +31,7 @@ class Requirement:
     id: int
     type: str
     target: str | None
+    target_chat_id: int | None
     settings: dict[str, object]
     created_at_ms: int
 
@@ -303,7 +304,11 @@ class RequirementRepository:
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Requirement violates database constraints") from exc
-        return Requirement(requirement_id, requirement_type, stored_target, settings, created_at_ms)
+        return Requirement(
+            requirement_id, requirement_type, stored_target,
+            int(stored_target) if requirement_type in {"JOIN_CHAT", "REACT"} else None,
+            settings, created_at_ms,
+        )
 
     async def get(self, requirement_id: int) -> Requirement | None:
         _positive_id(requirement_id, "requirement_id")
@@ -643,6 +648,9 @@ def _requirement_from_row(row) -> Requirement:
         id=int(row["id"]),
         type=str(row["type"]),
         target=None if row["target"] is None else str(row["target"]),
+        target_chat_id=(
+            None if row["target_chat_id"] is None else int(row["target_chat_id"])
+        ) if "target_chat_id" in row.keys() else None,
         settings=json.loads(str(row["settings_json"])),
         created_at_ms=int(row["created_at_ms"]),
     )
