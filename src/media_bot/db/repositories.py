@@ -796,6 +796,16 @@ class OfferRepository:
             row = await (await connection.execute(query, parameters)).fetchone()
         return None if row is None else _offer_from_row(row)
 
+    async def exists_slug_hash(self, slug_hash: bytes) -> bool:
+        """Return whether a panel-generated offer owns this token hash."""
+        _validate_offer_hash(slug_hash)
+        async with self.database.connection() as connection:
+            row = await (await connection.execute(
+                "SELECT 1 FROM offers WHERE slug_hash = ? AND slug_plain IS NOT NULL LIMIT 1",
+                (slug_hash,),
+            )).fetchone()
+        return row is not None
+
     async def get_by_id(self, offer_id: int, *, active_only: bool = False) -> Offer | None:
         _require_positive_int(offer_id, "offer_id")
         query = "SELECT * FROM offers WHERE id = ?"

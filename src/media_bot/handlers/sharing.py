@@ -82,10 +82,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings = _settings(context)
     database = _database(context)
     items = ItemRepository(database)
+    slug_hash = hash_share_token(token)
     try:
-        offer = await OfferRepository(database).get_by_slug_hash(
-            hash_share_token(token), active_only=False
-        )
+        offer_repository = OfferRepository(database)
+        offer = await offer_repository.get_by_slug_hash(slug_hash, active_only=False)
         logger.debug("start_slug_resolved offer_found=%s", offer is not None)
     except Exception as exc:
         logger.exception("offer_lookup_failed (%s)", type(exc).__name__)
@@ -96,6 +96,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await message.reply_text("This offer is unavailable.")
             return
         await _start_offer(update, context, offer, items)
+        return
+
+    try:
+        panel_offer_exists = await offer_repository.exists_slug_hash(slug_hash)
+    except Exception as exc:
+        logger.exception("panel_offer_existence_lookup_failed (%s)", type(exc).__name__)
+        await message.reply_text("This offer is temporarily unavailable.")
+        return
+    if panel_offer_exists:
+        logger.error("panel_offer_lookup_mismatch hash_prefix=%s", slug_hash.hex()[:12])
+        await message.reply_text("This offer is temporarily unavailable.")
         return
 
     links = ShareLinkService(

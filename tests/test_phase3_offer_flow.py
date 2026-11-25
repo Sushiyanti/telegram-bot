@@ -81,6 +81,7 @@ async def create_offer(
     *,
     token: str = "A" * 43,
     chats: tuple[tuple[int, str | None, str | None], ...] = (),
+    panel_slug: bool = False,
 ) -> tuple[Offer, str]:
     item = await ItemRepository(database).create_stored_item(MediaItem(
         owner_user_id=OWNER,
@@ -103,6 +104,7 @@ async def create_offer(
         created_by_user_id=OWNER,
         created_at_ms=1,
         updated_at_ms=1,
+        slug_plain=token if panel_slug else None,
     ))
     chat_repo = RequiredChatRepository(database)
     assignments = OfferRequirementRepository(database)
@@ -369,3 +371,61 @@ async def test_v4_verify_answer_timeout_does_not_abort_delivery(database: Databa
     await verify_callback(SimpleNamespace(callback_query=query), context)
     assert bot.copy_message.await_count == 2
     assert await event_types(database, offer.id, USER_A) == ["start", "unlock", "delivery"]
+
+
+@pytest.mark.asyncio
+async def test_r1_panel_slug_uses_offer_renderer_and_verify_button(database: Database) -> None:
+    offer, token = await create_offer(
+        database, token="panel-r1", panel_slug=True,
+        chats=((-1001, "one", "https://t.me/one"),),
+    )
+    update = update_for(USER_A, [token])
+    await start_command(update, context_for(database, USER_A, bot_for(SimpleNamespace(status="left")), [token]))
+    text = update.effective_message.reply_text.await_args.args[0]
+    markup = update.effective_message.reply_text.await_args.kwargs["reply_markup"]
+    assert text.startswith(offer.title)
+    assert "To unlock, complete the steps below:" in text
+    assert "to access this file" not in text
+    assert "React to at least one recent post" not in text
+    assert any(button.callback_data and button.callback_data.startswith("verify:") for row in markup.inline_keyboard for button in row)
+
+
+@pytest.mark.asyncio
+async def test_r2_panel_slug_lookup_mismatch_does_not_enter_legacy(monkeypatch, database: Database) -> None:
+    _, token = await create_offer(database, token="panel-r2", panel_slug=True)
+    monkeypatch.setattr(OfferRepository, "get_by_slug_hash", AsyncMock(return_value=None))
+    monkeypatch.setattr(OfferRepository, "exists_slug_hash", AsyncMock(return_value=True))
+    legacy = AsyncMock(side_effect=AssertionError("legacy path entered"))
+    monkeypatch.setattr("media_bot.handlers.sharing.ShareLinkService", legacy)
+    update = update_for(USER_A, [token])
+    await start_command(update, context_for(database, USER_A, bot_for(), [token]))
+    assert update.effective_message.reply_text.await_args.args[0] == "This offer is temporarily unavailable."
+    legacy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_r3_genuine_legacy_link_still_uses_legacy_path(database: Database) -> None:
+    item = await ItemRepository(database).create_stored_item(MediaItem(
+        owner_user_id=OWNER, media_type="document", file_size_bytes=100,
+        storage_messages=(StorageMessageRef(STORAGE, 55),),
+    ))
+    created = await ShareLinkService(
+        ShareLinkRepository(database), ItemRepository(database),
+        __import__("media_bot.media_transfer", fromlist=["TransferCapabilities"]).TransferCapabilities(10_000),
+    ).create(item_id=item.id, created_by_user_id=OWNER)
+    bot = bot_for(SimpleNamespace(status="member"))
+    await start_command(update_for(USER_A, [created.token]), context_for(database, USER_A, bot, [created.token]))
+    assert bot.copy_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_r4_panel_offer_output_has_no_legacy_fingerprints(database: Database) -> None:
+    _, token = await create_offer(
+        database, token="panel-r4", panel_slug=True,
+        chats=((-1001, "one", "https://t.me/one"),),
+    )
+    update = update_for(USER_A, [token])
+    await start_command(update, context_for(database, USER_A, bot_for(SimpleNamespace(status="left")), [token]))
+    text = update.effective_message.reply_text.await_args.args[0]
+    assert "to access this file" not in text
+    assert "React to at least one recent post" not in text
