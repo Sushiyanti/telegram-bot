@@ -825,6 +825,12 @@ async def _dispatch_callback(
         )
     elif action == "rule_type":
         await _select_rule_type(context, state, _str_arg(args, 0), query=query)
+    elif action == "cmpreqnew":
+        offer_id = _int_arg(args, 0)
+        state["wizard"] = {"offer_id": offer_id, "campaign_offer_id": offer_id}
+        state["input"] = None
+        await _start_requirement_input(context, state, None)
+        state["wizard"]["campaign_offer_id"] = offer_id
     elif action == "rule_link_edit":
         await _start_rule_link_input(context, state, query=query)
     elif action == "rule_link_continue":
@@ -1292,7 +1298,8 @@ async def _select_rule_type(
 ) -> None:
     wizard = _require_rule_wizard(state)
     if rule_type not in {"JOIN_CHAT", "REACT", "START_BOT", "TIMED_WAIT"}:
-        raise ValueError("Unknown rule type")
+        await _edit_panel(context, state, "Unknown rule type", _back_home(state), query=query)
+        return
     if wizard.get("campaign_offer_id") is not None and rule_type != "REACT":
         raise InvalidRecord("Campaign requirements must be REACT rules")
     wizard.update({"type": rule_type, "step": "target"})
@@ -1533,6 +1540,7 @@ async def _save_rule(
         last_x_messages=int(wizard.get("last_x_messages", 5)) if rule_type == "REACT" else None,
         last_x_days=int(wizard.get("last_x_days", 0)) if rule_type == "REACT" else None,
         link_url=wizard.get("link_url") if isinstance(wizard.get("link_url"), str) else None,
+        attach_scope=wizard.get("campaign_offer_id") is None,
     )
     category_id = wizard.get("category_id")
     scope_name = str(wizard.get("scope_name", "Global"))
@@ -2238,9 +2246,17 @@ async def _finish_channel_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[s
         raise InvalidRecord("The identifier must resolve to a channel or group")
     username = getattr(chat, "username", None)
     username = str(username).lstrip("@").strip() if username else None
-    invite_url = wizard.get("invite_url") or (f"https://t.me/{username}" if username else None)
+    telegram_invite = getattr(chat, "invite_link", None)
+    invite_url = (
+        telegram_invite if isinstance(telegram_invite, str) and telegram_invite.startswith("https://")
+        else (f"https://t.me/{username}" if username else None)
+    )
     if not invite_url:
-        await _edit_panel(context, state, "An invite URL is required when Telegram does not provide a public username.", _input_markup(state), query=query)
+        await _edit_panel(
+            context, state,
+            "Telegram did not return a join link or public username for this channel. Make the bot an admin (so it can read invite_link) or use a public channel.",
+            _input_markup(state), query=query,
+        )
         return
     title = str(wizard.get("display_name") or username or getattr(chat, "title", "Required channel"))
     existing = next((row for row in await RequiredChatRepository(_database(context)).list_enabled() if row.chat_id == int(chat.id)), None)
@@ -2283,14 +2299,11 @@ async def _remove_campaign_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[
 async def _show_campaign_requirement_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
     requirements = tuple(item for item in await RequirementRepository(_database(context)).list_all() if item.type == "REACT")
     rows = [[_button(f"{item.type} · {item.id}", state, "cmpreq", offer_id, item.id)] for item in requirements]
-    if requirements:
-        text = "Choose an existing requirement (including REACT)."
-    else:
-        state["wizard"] = {"offer_id": offer_id}
-        state["input"] = {"kind": "campaign_requirement_new"}
-        _touch_pending_flow(state)
-        text = "No REACT requirements yet. Reply 'new' to create one now, or /panel to return."
-        rows.append([_button("Cancel", state, "cmpreqnew_cancel")])
+    state["wizard"] = {"offer_id": offer_id}
+    state["input"] = {"kind": "campaign_requirement_new"}
+    _touch_pending_flow(state)
+    text = "Choose an existing REACT requirement, or create a campaign-specific one."
+    rows.append([_button("Create new REACT requirement", state, "cmpreqnew", offer_id)])
     rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, text, _markup(rows), query=query)
 
 

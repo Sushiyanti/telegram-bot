@@ -267,7 +267,7 @@ async def test_r1_empty_campaign_requirement_picker_prompts_inline_creation(data
     query = SimpleNamespace(edit_message_text=AsyncMock())
     context = context_for(database, state, SimpleNamespace())
     await panel._show_campaign_requirement_picker(context, state, offer.id, query=query)
-    assert "Reply 'new'" in query.edit_message_text.await_args.kwargs["text"]
+    assert "create a campaign-specific" in query.edit_message_text.await_args.kwargs["text"]
     assert state["input"]["kind"] == "campaign_requirement_new"
 
 
@@ -292,6 +292,25 @@ async def test_r3_existing_react_requirement_links_without_duplicate(database: D
     await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
     await panel._add_campaign_requirement(context_for(database, state, SimpleNamespace()), state, offer.id, requirement.id)
     assert len(await OfferRequirementRepository(database).list_requirements(offer.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_r4_campaign_react_creation_is_offer_scoped_not_global(database: Database) -> None:
+    offer = await make_offer(database, "r4")
+    state = {"nonce": "n", "owner_user_id": OWNER, "chat_id": OWNER, "message_id": 77,
+             "closed": False, "view": "campaign", "wizard": {
+                 "offer_id": offer.id, "campaign_offer_id": offer.id, "type": "REACT",
+                 "target": -1001, "is_fake": True, "wait_seconds": 0,
+                 "last_x_messages": 5, "last_x_days": 0, "link_url": "https://t.me/one",
+             }}
+    await panel._save_rule(context_for(database, state, SimpleNamespace()), state)
+    rows = await OfferRequirementRepository(database).list_requirements(offer.id)
+    assert len(rows) == 1
+    async with database.connection() as connection:
+        cursor = await connection.execute(
+            "SELECT COUNT(*) FROM category_requirements WHERE requirement_id = ?", (rows[0].requirement_id,)
+        )
+        assert int((await cursor.fetchone())[0]) == 0
 
 
 @pytest.mark.asyncio

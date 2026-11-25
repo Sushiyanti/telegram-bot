@@ -241,6 +241,7 @@ class RequirementRepository:
         last_x_messages: int | None = None,
         last_x_days: int | None = None,
         link_url: str | None = None,
+        attach_scope: bool = True,
     ) -> Requirement:
         requirement_type = str(requirement_type).upper()
         if requirement_type not in _REQUIREMENT_TYPES:
@@ -285,10 +286,11 @@ class RequirementRepository:
                     (requirement_type, stored_target, settings_json, created_at_ms),
                 )
                 requirement_id = int(cursor.lastrowid)
-                await connection.execute(
-                    "INSERT INTO category_requirements (category_id, requirement_id) VALUES (?, ?)",
-                    (category_id, requirement_id),
-                )
+                if attach_scope:
+                    await connection.execute(
+                        "INSERT INTO category_requirements (category_id, requirement_id) VALUES (?, ?)",
+                        (category_id, requirement_id),
+                    )
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Requirement violates database constraints") from exc
