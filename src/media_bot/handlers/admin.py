@@ -226,8 +226,9 @@ async def reactiondiag_command(update: Update, context: ContextTypes.DEFAULT_TYP
             """SELECT offers.id offer_id, requirements.id requirement_id,
                       requirements.target, requirements.settings_json
                FROM offers
-               JOIN offer_requirements ON offer_requirements.offer_id = offers.id
-               JOIN requirements ON requirements.id = offer_requirements.requirement_id
+               JOIN rule_assignments ON rule_assignments.offer_id = offers.id
+                                      AND rule_assignments.scope_type = 'OFFER'
+               JOIN requirements ON requirements.id = rule_assignments.requirement_id
                WHERE requirements.type = 'REACT'""" + offer_filter + " ORDER BY offers.id, requirements.id",
             params,
         )).fetchall()

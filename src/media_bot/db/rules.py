@@ -141,10 +141,11 @@ class CategoryRepository:
                        JOIN inherited ON links.parent_category_id = inherited.id
                    )
                    SELECT DISTINCT requirements.* FROM requirements
-                   JOIN category_requirements AS associations
+                   JOIN rule_assignments AS associations
                      ON associations.requirement_id = requirements.id
-                   WHERE associations.category_id IS NULL
-                      OR associations.category_id IN (SELECT id FROM inherited)
+                   WHERE associations.scope_type IN ('GLOBAL', 'CATEGORY')
+                     AND (associations.category_id IS NULL
+                          OR associations.category_id IN (SELECT id FROM inherited))
                    ORDER BY requirements.id""",
                 (category_id,),
             )
@@ -205,7 +206,7 @@ class CategoryRepository:
                 (default.id, category.id),
             )
             await connection.execute(
-                "DELETE FROM category_requirements WHERE category_id = ?", (category.id,)
+                "DELETE FROM rule_assignments WHERE scope_type = 'CATEGORY' AND category_id = ?", (category.id,)
             )
             await connection.execute(
                 "DELETE FROM category_links WHERE parent_category_id = ? OR child_category_id = ?",
@@ -216,8 +217,8 @@ class CategoryRepository:
                 await connection.execute(
                     """DELETE FROM requirements
                        WHERE NOT EXISTS (
-                           SELECT 1 FROM category_requirements
-                           WHERE category_requirements.requirement_id = requirements.id
+                           SELECT 1 FROM rule_assignments
+                           WHERE rule_assignments.requirement_id = requirements.id
                        )"""
                 )
             await connection.commit()
@@ -290,14 +291,14 @@ class RequirementRepository:
                         await connection.rollback()
                         raise RecordNotFound("Category was not found")
                 cursor = await connection.execute(
-                    "INSERT INTO requirements (type, target, settings_json, created_at_ms) VALUES (?, ?, ?, ?)",
-                    (requirement_type, stored_target, settings_json, created_at_ms),
+                    "INSERT INTO requirements (type, target, target_chat_id, settings_json, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+                    (requirement_type, stored_target, int(stored_target) if requirement_type in {"JOIN_CHAT", "REACT"} else None, settings_json, created_at_ms),
                 )
                 requirement_id = int(cursor.lastrowid)
                 if attach_scope:
                     await connection.execute(
-                        "INSERT INTO category_requirements (category_id, requirement_id) VALUES (?, ?)",
-                        (category_id, requirement_id),
+                        "INSERT INTO rule_assignments (scope_type, category_id, requirement_id) VALUES (?, ?, ?)",
+                        ("GLOBAL" if category_id is None else "CATEGORY", category_id, requirement_id),
                     )
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -319,15 +320,16 @@ class RequirementRepository:
             if category_id is None:
                 cursor = await connection.execute(
                     """SELECT requirements.* FROM requirements
-                       JOIN category_requirements ON category_requirements.requirement_id = requirements.id
-                       WHERE category_requirements.category_id IS NULL
+                       JOIN rule_assignments ON rule_assignments.requirement_id = requirements.id
+                       WHERE rule_assignments.scope_type = 'GLOBAL'
                        ORDER BY requirements.id"""
                 )
             else:
                 cursor = await connection.execute(
                     """SELECT requirements.* FROM requirements
-                       JOIN category_requirements ON category_requirements.requirement_id = requirements.id
-                       WHERE category_requirements.category_id = ?
+                       JOIN rule_assignments ON rule_assignments.requirement_id = requirements.id
+                       WHERE rule_assignments.scope_type = 'CATEGORY'
+                         AND rule_assignments.category_id = ?
                        ORDER BY requirements.id""",
                     (category_id,),
                 )
@@ -346,17 +348,20 @@ class RequirementRepository:
         _positive_id(requirement_id, "requirement_id")
         async with self.database.connection() as connection:
             cursor = await connection.execute(
-                """SELECT category_requirements.category_id, categories.name
-                   FROM category_requirements
+                """SELECT rule_assignments.scope_type, rule_assignments.category_id,
+                          rule_assignments.offer_id, categories.name
+                   FROM rule_assignments
                    LEFT JOIN categories
-                     ON categories.id = category_requirements.category_id
-                   WHERE category_requirements.requirement_id = ?
-                   ORDER BY category_requirements.category_id""",
+                     ON categories.id = rule_assignments.category_id
+                   WHERE rule_assignments.requirement_id = ?
+                   ORDER BY rule_assignments.scope_type, rule_assignments.category_id,
+                            rule_assignments.offer_id""",
                 (requirement_id,),
             )
             rows = await cursor.fetchall()
         return tuple(
-            "Global" if row["category_id"] is None else str(row["name"])
+            "Global" if row["scope_type"] == "GLOBAL" else
+            (str(row["name"]) if row["scope_type"] == "CATEGORY" else f"Offer {row['offer_id']}")
             for row in rows
         )
 
@@ -372,7 +377,7 @@ class RequirementRepository:
                 await connection.rollback()
                 return False
             await connection.execute(
-                "DELETE FROM category_requirements WHERE requirement_id = ?",
+                "DELETE FROM rule_assignments WHERE requirement_id = ?",
                 (requirement_id,),
             )
             cursor = await connection.execute(
@@ -392,12 +397,12 @@ class RequirementRepository:
             await connection.execute("BEGIN IMMEDIATE")
             if category_id is None:
                 cursor = await connection.execute(
-                    "DELETE FROM category_requirements WHERE category_id IS NULL AND requirement_id = ?",
+                    "DELETE FROM rule_assignments WHERE scope_type = 'GLOBAL' AND requirement_id = ?",
                     (requirement_id,),
                 )
             else:
                 cursor = await connection.execute(
-                    "DELETE FROM category_requirements WHERE category_id = ? AND requirement_id = ?",
+                    "DELETE FROM rule_assignments WHERE scope_type = 'CATEGORY' AND category_id = ? AND requirement_id = ?",
                     (category_id, requirement_id),
                 )
             if cursor.rowcount != 1:
@@ -405,7 +410,7 @@ class RequirementRepository:
                 return False
             await connection.execute(
                 """DELETE FROM requirements WHERE id = ? AND NOT EXISTS (
-                       SELECT 1 FROM category_requirements WHERE requirement_id = ?
+                       SELECT 1 FROM rule_assignments WHERE requirement_id = ?
                    )""",
                 (requirement_id, requirement_id),
             )

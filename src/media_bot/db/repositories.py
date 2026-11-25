@@ -865,42 +865,75 @@ class OfferRequirementRepository:
         _require_nonzero_int(chat_id, "chat_id")
         _require_order(sort_order)
         async with self.database.connection() as connection:
-            offer = await (await connection.execute(
-                "SELECT 1 FROM offers WHERE id = ?", (offer_id,)
-            )).fetchone()
-            if offer is None:
+            await connection.execute("BEGIN IMMEDIATE")
+            if await (await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))).fetchone() is None:
+                await connection.rollback()
                 raise InvalidRecord("Offer not found")
-            chat = await (await connection.execute(
-                "SELECT 1 FROM required_chats WHERE chat_id = ?", (chat_id,)
-            )).fetchone()
-            if chat is None:
+            if await (await connection.execute("SELECT 1 FROM required_chats WHERE chat_id = ?", (chat_id,))).fetchone() is None:
+                await connection.rollback()
                 raise InvalidRecord("Channel is not registered; add it via the wizard first")
+            existing = await (await connection.execute(
+                """SELECT 1 FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
+                   WHERE ra.scope_type = 'OFFER' AND ra.offer_id = ?
+                     AND r.type = 'JOIN_CHAT' AND r.target_chat_id = ? LIMIT 1""",
+                (offer_id, chat_id),
+            )).fetchone()
+            if existing is not None:
+                await connection.rollback()
+                return False
             cursor = await connection.execute(
-                """INSERT INTO offer_required_chats (offer_id, chat_id, sort_order)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(offer_id, chat_id) DO NOTHING""",
-                (offer_id, chat_id, sort_order),
+                """INSERT INTO requirements (type, target, target_chat_id, settings_json, created_at_ms)
+                   VALUES ('JOIN_CHAT', ?, ?, json_object('is_fake', 0, 'wait_seconds', 0), ?)""",
+                (str(chat_id), chat_id, _now_ms()),
             )
+            requirement_id = int(cursor.lastrowid)
+            cursor = await connection.execute(
+                """INSERT INTO rule_assignments (requirement_id, scope_type, offer_id, sort_order)
+                   VALUES (?, 'OFFER', ?, ?)""", (requirement_id, offer_id, sort_order)
+            )
+            await connection.commit()
         return cursor.rowcount == 1
 
     async def remove_required_chat(self, offer_id: int, chat_id: int) -> bool:
         _require_positive_int(offer_id, "offer_id")
         _require_nonzero_int(chat_id, "chat_id")
         async with self.database.connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
-                "DELETE FROM offer_required_chats WHERE offer_id = ? AND chat_id = ?",
+                """DELETE FROM rule_assignments
+                   WHERE scope_type = 'OFFER' AND offer_id = ?
+                     AND requirement_id IN (SELECT id FROM requirements
+                                            WHERE type = 'JOIN_CHAT' AND target_chat_id = ?)""",
                 (offer_id, chat_id),
             )
+            await connection.execute(
+                """DELETE FROM requirements WHERE type = 'JOIN_CHAT' AND target_chat_id = ?
+                   AND NOT EXISTS (SELECT 1 FROM rule_assignments ra WHERE ra.requirement_id = requirements.id)""",
+                (chat_id,),
+            )
+            await connection.commit()
         return cursor.rowcount == 1
 
     async def list_required_chats(self, offer_id: int, *, enabled_only: bool = True) -> tuple[OfferRequiredChat, ...]:
         _require_positive_int(offer_id, "offer_id")
-        query = "SELECT * FROM offer_required_chats WHERE offer_id = ?"
-        if enabled_only:
-            query += " AND is_enabled = 1"
-        query += " ORDER BY sort_order, chat_id"
         async with self.database.connection() as connection:
-            rows = await (await connection.execute(query, (offer_id,))).fetchall()
+            rows = await (await connection.execute(
+                """WITH RECURSIVE inherited(category_id) AS (
+                       SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
+                       WHERE o.id = ? AND i.category_id IS NOT NULL
+                       UNION
+                       SELECT cl.parent_category_id FROM category_links cl
+                       JOIN inherited i ON cl.child_category_id = i.category_id
+                   )
+                   SELECT DISTINCT ? AS offer_id, r.target_chat_id AS chat_id,
+                          ra.sort_order, 1 AS is_enabled
+                   FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
+                   WHERE r.type = 'JOIN_CHAT' AND (
+                         ra.scope_type = 'GLOBAL'
+                         OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
+                         OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
+                   ) ORDER BY ra.sort_order, r.target_chat_id""",
+                (offer_id, offer_id, offer_id))).fetchall()
         return tuple(_offer_required_chat_from_row(row) for row in rows)
 
     async def add_requirement(self, offer_id: int, requirement_id: int, *, sort_order: int = 0) -> bool:
@@ -908,21 +941,13 @@ class OfferRequirementRepository:
         _require_positive_int(requirement_id, "requirement_id")
         _require_order(sort_order)
         async with self.database.connection() as connection:
-            offer = await (await connection.execute(
-                "SELECT 1 FROM offers WHERE id = ?", (offer_id,)
-            )).fetchone()
-            if offer is None:
+            if await (await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))).fetchone() is None:
                 raise InvalidRecord("Offer not found")
-            requirement = await (await connection.execute(
-                "SELECT 1 FROM requirements WHERE id = ?", (requirement_id,)
-            )).fetchone()
-            if requirement is None:
+            if await (await connection.execute("SELECT 1 FROM requirements WHERE id = ?", (requirement_id,))).fetchone() is None:
                 raise InvalidRecord("Requirement not found")
             cursor = await connection.execute(
-                """INSERT INTO offer_requirements (offer_id, requirement_id, sort_order)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(offer_id, requirement_id) DO NOTHING""",
-                (offer_id, requirement_id, sort_order),
+                """INSERT INTO rule_assignments (offer_id, requirement_id, scope_type, sort_order)
+                   VALUES (?, ?, 'OFFER', ?)""", (offer_id, requirement_id, sort_order)
             )
         return cursor.rowcount == 1
 
@@ -931,7 +956,7 @@ class OfferRequirementRepository:
         _require_positive_int(requirement_id, "requirement_id")
         async with self.database.connection() as connection:
             cursor = await connection.execute(
-                "DELETE FROM offer_requirements WHERE offer_id = ? AND requirement_id = ?",
+                "DELETE FROM rule_assignments WHERE scope_type = 'OFFER' AND offer_id = ? AND requirement_id = ?",
                 (offer_id, requirement_id),
             )
         return cursor.rowcount == 1
@@ -940,15 +965,26 @@ class OfferRequirementRepository:
         _require_positive_int(offer_id, "offer_id")
         async with self.database.connection() as connection:
             rows = await (await connection.execute(
-                "SELECT * FROM offer_requirements WHERE offer_id = ? ORDER BY sort_order, requirement_id",
-                (offer_id,),
-            )).fetchall()
+                """WITH RECURSIVE inherited(category_id) AS (
+                       SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
+                       WHERE o.id = ? AND i.category_id IS NOT NULL
+                       UNION
+                       SELECT cl.parent_category_id FROM category_links cl
+                       JOIN inherited i ON cl.child_category_id = i.category_id
+                   )
+                   SELECT DISTINCT ? AS offer_id, ra.requirement_id, ra.sort_order
+                   FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
+                   WHERE r.type <> 'JOIN_CHAT' AND (
+                         ra.scope_type = 'GLOBAL'
+                         OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
+                         OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
+                   ) ORDER BY ra.sort_order, ra.requirement_id""",
+                (offer_id, offer_id, offer_id))).fetchall()
         return tuple(_offer_requirement_from_row(row) for row in rows)
 
     async def get_requirement(self, requirement_id: int):
-        """Resolve an assigned requirement through the existing rule repository."""
+        """Resolve an assigned requirement through the canonical rule repository."""
         from media_bot.db.rules import RequirementRepository
-
         return await RequirementRepository(self.database).get(requirement_id)
 
 

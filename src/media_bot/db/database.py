@@ -47,7 +47,13 @@ class Database:
         )
         connection.row_factory = sqlite3.Row
         try:
-            await connection.execute("PRAGMA foreign_keys = ON")
+            cursor = await connection.execute("PRAGMA foreign_keys = ON")
+            await cursor.close()
+            cursor = await connection.execute("PRAGMA foreign_keys")
+            foreign_keys = await cursor.fetchone()
+            await cursor.close()
+            if foreign_keys is None or int(foreign_keys[0]) != 1:
+                raise DatabaseError("SQLite foreign-key enforcement could not be enabled")
             await connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
             await connection.execute("PRAGMA synchronous = FULL")
             yield connection
@@ -193,6 +199,11 @@ class Database:
                 if row is None or int(row[0]) < 1:
                     raise DatabaseError("The source database is not initialized")
                 async with aiosqlite.connect(temporary) as target:
+                    await target.execute("PRAGMA foreign_keys = ON")
+                    cursor = await target.execute("PRAGMA foreign_keys")
+                    row = await cursor.fetchone()
+                    if row is None or int(row[0]) != 1:
+                        raise DatabaseError("SQLite foreign-key enforcement could not be enabled for backup")
                     await source.backup(target)
                     await target.commit()
             await self._validate_database_file(temporary)
@@ -219,12 +230,19 @@ class Database:
         temporary = cls._temporary_path(destination.parent, destination.name)
         try:
             async with aiosqlite.connect(source) as backup:
+                await backup.execute("PRAGMA foreign_keys = ON")
                 async with aiosqlite.connect(temporary) as target:
+                    await target.execute("PRAGMA foreign_keys = ON")
                     await backup.backup(target)
                     await target.commit()
             await cls._validate_database_file(temporary)
             supported_versions = [version for version, _ in cls._load_migrations()]
             async with aiosqlite.connect(temporary) as check:
+                await check.execute("PRAGMA foreign_keys = ON")
+                cursor = await check.execute("PRAGMA foreign_keys")
+                fk_row = await cursor.fetchone()
+                if fk_row is None or int(fk_row[0]) != 1:
+                    raise DatabaseError("SQLite foreign-key enforcement is disabled during restore validation")
                 cursor = await check.execute("PRAGMA user_version")
                 row = await cursor.fetchone()
                 version = int(row[0]) if row is not None else 0
@@ -259,6 +277,11 @@ class Database:
         uri = f"file:{quote(str(path.resolve()))}?mode=ro"
         try:
             async with aiosqlite.connect(uri, uri=True) as connection:
+                await connection.execute("PRAGMA foreign_keys = ON")
+                cursor = await connection.execute("PRAGMA foreign_keys")
+                fk_row = await cursor.fetchone()
+                if fk_row is None or int(fk_row[0]) != 1:
+                    raise DatabaseError("SQLite foreign-key enforcement is disabled during validation")
                 cursor = await connection.execute("PRAGMA integrity_check")
                 result = await cursor.fetchall()
                 if len(result) != 1 or result[0][0] != "ok":

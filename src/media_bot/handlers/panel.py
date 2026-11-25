@@ -8,6 +8,7 @@ import secrets
 import time
 import hashlib
 from typing import Any
+from urllib.parse import urlsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationHandlerStop, ContextTypes
@@ -561,8 +562,16 @@ async def admin_panel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else:
             try:
                 wizard["react_post"] = validate_telegram_link(value)
+                resolved_channel = await _resolve_post_channel_id(context, wizard["react_post"])
+                if resolved_channel is None:
+                    raise InvalidRecord("post URL must identify a public channel or private t.me/c channel")
+                wizard["react_post_channel_id"] = resolved_channel
+                if int(wizard["target"]) != resolved_channel:
+                    raise InvalidRecord(
+                        f"post channel {resolved_channel} does not match selected REACT channel {wizard['target']}"
+                    )
             except InvalidRecord:
-                await _edit_panel(context, state, "Target post is required: send a valid Telegram post URL, message ID, or 'any recent'.", _input_markup(state))
+                await _edit_panel(context, state, "Target post URL does not match the selected REACT channel. Send a post from that channel, a numeric message ID, or 'any recent'.", _input_markup(state))
                 raise ApplicationHandlerStop
         state["input"] = {"kind": "react_emoji"}
         wizard["step"] = "react_emoji"
@@ -721,6 +730,35 @@ def _parse_rule_target(value: object, requirement_type: str) -> int | None:
     if requirement_type == "START_BOT" and parsed < 0:
         return None
     return parsed
+
+
+async def _resolve_post_channel_id(
+    context: ContextTypes.DEFAULT_TYPE,
+    post_url: str,
+) -> int | None:
+    """Resolve the channel encoded by a Telegram post URL.
+
+    ``t.me/c/<internal-id>/<message-id>`` is deterministic even for private
+    channels. Public links are resolved through Telegram so the registry's
+    canonical numeric chat identity remains the value stored in the rule.
+    """
+    parsed = urlsplit(post_url)
+    if parsed.netloc.lower() not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or not parts[-1].isdigit():
+        return None
+    if parts[0] == "c" and len(parts) >= 3 and parts[1].isdigit():
+        return int(f"-100{parts[1]}")
+    username = parts[0]
+    if username in {"joinchat"} or username.startswith("+"):
+        return None
+    try:
+        chat = await context.bot.get_chat(f"@{username}")
+    except Exception:
+        return None
+    chat_id = getattr(chat, "id", None)
+    return int(chat_id) if _valid_chat_id(chat_id) else None
 
 
 async def _dispatch_callback(
@@ -1404,27 +1442,35 @@ async def _select_rule_verification(
     if rule_type == "START_BOT" and mode == "real":
         raise InvalidRecord("Real START_BOT verification is not supported")
     wizard["is_fake"] = mode == "fake"
-    if rule_type == "JOIN_CHAT" and mode == "real":
+    if rule_type in {"JOIN_CHAT", "REACT"} and mode == "real":
         target = wizard.get("target")
         if not isinstance(target, int):
-            raise InvalidRecord("JOIN_CHAT target is missing")
+            raise InvalidRecord(f"{rule_type} target is missing")
         bot_admin_status = await _bot_is_chat_admin(context, target)
         if bot_admin_status is False or bot_admin_status is None:
             wizard["step"] = "join_warning"
             state["view"] = "rule_wizard_admin_warning"
-            rows = [
-                [_button("Continue Anyway", state, "rule_continue")],
+            rows = []
+            if rule_type == "JOIN_CHAT":
+                rows.append([_button("Continue Anyway", state, "rule_continue")])
+            rows.extend([
                 [_button("Use Fake", state, "rule_fake")],
                 [_button("Cancel", state, "rule_cancel")],
-            ]
+            ])
+            if rule_type == "REACT":
+                warning = (
+                    f"REACT target {target} is not administered by the bot; a real reaction check cannot be saved."
+                    if bot_admin_status is False
+                    else "Telegram could not verify bot administrator access; a real REACT rule cannot be saved."
+                )
+            elif bot_admin_status is False:
+                warning = "⚠️ Bot is not an admin in this channel. Real checks may fail."
+            else:
+                warning = "⚠️ Could not verify whether the bot is an admin. Telegram lookup failed; check permissions and retry."
             await _edit_panel(
                 context,
                 state,
-                (
-                    "⚠️ Bot is not an admin in this channel. Real checks may fail."
-                    if bot_admin_status is False
-                    else "⚠️ Could not verify whether the bot is an admin. Telegram lookup failed; check permissions and retry."
-                ),
+                warning,
                 _markup(rows),
                 query=query,
             )
@@ -1560,6 +1606,8 @@ async def _show_rule_confirmation(
             else f"within {wizard.get('last_x_days', 0)} days"
         )
         lines.append(
+            f"Post: {wizard.get('react_post', 'any_recent')}\n"
+            f"Emoji: {wizard.get('reaction_emoji', 'not configured')}\n"
             f"Window: {message_window} / {day_window}"
         )
     wizard["step"] = "confirm"
@@ -2126,14 +2174,14 @@ async def _toggle_campaign(context: ContextTypes.DEFAULT_TYPE, state: dict[str, 
 
 async def _show_campaign_chat_picker(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], offer_id: int, *, query: Any = None) -> None:
     chats = await RequiredChatRepository(_database(context)).list_enabled(); rows = [[_button((chat.username or chat.title)[:30], state, "cmpchat", offer_id, chat.chat_id)] for chat in chats]
-    rows.append([_button("＋ Add new channel", state, "cmpnewchat", offer_id)])
+    rows.append([_button("＋ Register in Requirements", state, "requirements", 0)])
     rows.append([_button("‹ Back", state, "cmp", offer_id)]); await _edit_panel(context, state, "Choose a required channel or group.", _markup(rows), query=query)
 
 
 async def _required_chat_offer_count(database: Database, chat_id: int) -> int:
     async with database.connection() as connection:
         row = await (await connection.execute(
-            "SELECT COUNT(*) FROM offer_required_chats WHERE chat_id = ?", (chat_id,)
+            """SELECT COUNT(*) FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id WHERE ra.scope_type = 'OFFER' AND r.type = 'JOIN_CHAT' AND r.target_chat_id = ?""", (chat_id,)
         )).fetchone()
     return int(row[0])
 
@@ -2231,8 +2279,11 @@ async def _begin_required_chat_remove(context: ContextTypes.DEFAULT_TYPE, state:
 
 async def _remove_required_chat(context: ContextTypes.DEFAULT_TYPE, state: dict[str, Any], chat_id: int, *, query: Any = None) -> None:
     async with _database(context).connection() as connection:
-        await connection.execute("DELETE FROM offer_required_chats WHERE chat_id = ?", (chat_id,))
+        await connection.execute("BEGIN IMMEDIATE")
+        await connection.execute("""DELETE FROM rule_assignments WHERE scope_type = 'OFFER' AND requirement_id IN (SELECT id FROM requirements WHERE type = 'JOIN_CHAT' AND target_chat_id = ?)""", (chat_id,))
+        await connection.execute("""DELETE FROM requirements WHERE type = 'JOIN_CHAT' AND target_chat_id = ? AND NOT EXISTS (SELECT 1 FROM rule_assignments ra WHERE ra.requirement_id = requirements.id)""", (chat_id,))
         await connection.execute("UPDATE required_chats SET is_enabled = 0, updated_at_ms = ? WHERE chat_id = ?", (int(time.time() * 1000), chat_id))
+        await connection.commit()
     await _show_required_chats(context, state, query=query, notice="Channel removed and unlinked from all offers.")
 
 
