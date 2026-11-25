@@ -13,6 +13,7 @@ from media_bot.config import Settings
 from media_bot.db.database import Database
 from media_bot.db.repositories import ItemRepository
 from media_bot.db.repositories import OfferEventRepository, OfferRepository
+from media_bot.db.repositories import RequiredChatRepository
 
 
 logger = logging.getLogger(__name__)
@@ -166,3 +167,41 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             starts = int(row["starts"] or 0); unlocks = int(row["unlocks"] or 0)
             lines.append(f"• {str(row['title'])[:40]} — {starts} starts, {unlocks} unlocks, {(unlocks / starts * 100 if starts else 0):.1f}%")
     await message.reply_text("\n".join(lines))
+
+
+async def fixinvites_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repair missing required-chat URLs using Telegram's invite_link or username."""
+    message = update.effective_message
+    if message is None:
+        return
+    database = _database(context)
+    chats = await RequiredChatRepository(database).list_enabled()
+    filled: list[int] = []
+    failed: list[int] = []
+    async with database.connection() as connection:
+        for row in chats:
+            if row.invite_url:
+                continue
+            try:
+                chat = await context.bot.get_chat(row.chat_id)
+                invite_link = getattr(chat, "invite_link", None)
+                username = getattr(chat, "username", None)
+                url = invite_link if isinstance(invite_link, str) and invite_link.startswith("https://") else (
+                    f"https://t.me/{str(username).lstrip('@')}" if username else None
+                )
+                if not url:
+                    failed.append(row.chat_id)
+                    continue
+                await connection.execute(
+                    "UPDATE required_chats SET invite_url = ?, updated_at_ms = ? WHERE chat_id = ?",
+                    (url, int(datetime.now(tz=timezone.utc).timestamp() * 1000), row.chat_id),
+                )
+                filled.append(row.chat_id)
+            except Exception:
+                logger.warning("fixinvites_chat_failed chat_id=%s", row.chat_id, exc_info=True)
+                failed.append(row.chat_id)
+        await connection.commit()
+    await message.reply_text(
+        f"Invite repair complete. Filled: {len(filled)} ({', '.join(map(str, filled)) or 'none'}). "
+        f"Failed: {len(failed)} ({', '.join(map(str, failed)) or 'none'})."
+    )

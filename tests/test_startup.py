@@ -62,7 +62,7 @@ def test_application_builds_without_network_access(settings: Settings) -> None:
     assert commands == {
         "start", "whoami", "configcheck", "share", "redeem", "adduser", "revoke",
         "list", "delete", "addcategory", "linkcategory", "addrequirement",
-        "delcategory", "togglecommands", "admin", "panel", "stats",
+        "delcategory", "togglecommands", "admin", "panel", "stats", "fixinvites",
     }
     assert application.bot_data["settings"] is settings
     assert application.bot_data["database"].path == settings.db_path
