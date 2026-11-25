@@ -89,6 +89,18 @@ class OfferEvaluator:
         self.reaction_repo = reaction_repo
         self.chat_repo = chat_repo
 
+    async def configured_wait_seconds(self, offer_id: int) -> int:
+        """Return the longest configured gate wait for a Verify attempt."""
+        waits: list[int] = []
+        for assignment in await self._list_requirements(offer_id):
+            requirement = await self._resolve_requirement(assignment)
+            settings = getattr(requirement, "settings", {}) or {}
+            try:
+                waits.append(max(0, int(settings.get("wait_seconds", 0))))
+            except (TypeError, ValueError):
+                continue
+        return max(waits, default=0)
+
     async def evaluate(self, offer_id: int, user_id: int) -> OfferEvaluationResult:
         offer = await self._offer(offer_id)
         if offer is None or not bool(getattr(offer, "is_enabled", False)):

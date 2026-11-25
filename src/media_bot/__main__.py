@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 import sys
 
 from media_bot.application import build_application
@@ -29,6 +31,10 @@ def main() -> None:
         raise SystemExit(2) from exc
 
     configure_logging(settings.log_level)
+    logger.info(
+        "bot_runtime_instance hostname=%s pid=%s db_path=%s",
+        socket.gethostname(), os.getpid(), settings.db_path,
+    )
     try:
         prepare_state_directory(settings.db_path)
     except StartupPrerequisiteError as exc:

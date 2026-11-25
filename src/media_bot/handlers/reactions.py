@@ -25,6 +25,10 @@ class ReactionUpdateHandler:
             posted_at = getattr(post, "date", None)
             if chat is not None and getattr(chat, "id", None) is not None:
                 timestamp = int(posted_at.timestamp() * 1000) if posted_at is not None else _now_ms()
+                logger.info(
+                    "channel_post_received channel_id=%s message_id=%s posted_at_ms=%s",
+                    int(chat.id), int(post.message_id), timestamp,
+                )
                 try:
                     await self.repository.observe_post(
                         int(chat.id), int(post.message_id), timestamp
@@ -45,6 +49,10 @@ class ReactionUpdateHandler:
                 getattr(chat, "id", None), getattr(change, "message_id", None),
             )
             return
+        old_emojis = tuple(
+            key for reaction in (getattr(change, "old_reaction", None) or ())
+            if (key := _reaction_key(reaction)) is not None
+        )
         emojis = tuple(
             key for reaction in (getattr(change, "new_reaction", None) or ())
             if (key := _reaction_key(reaction)) is not None
@@ -52,6 +60,10 @@ class ReactionUpdateHandler:
         change_date = getattr(change, "date", None)
         changed_at_ms = int(change_date.timestamp() * 1000) if change_date is not None else _now_ms()
         try:
+            logger.info(
+                "reaction_update_received identifiable_user=true user_id=%s channel_id=%s message_id=%s old_reactions=%s new_reactions=%s",
+                int(user.id), int(chat.id), int(change.message_id), list(old_emojis), list(emojis),
+            )
             persisted = await self.repository.replace_user_message_reactions(
                 user_id=int(user.id),
                 channel_id=int(chat.id),

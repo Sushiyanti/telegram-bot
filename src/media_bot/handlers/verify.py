@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+import asyncio
 from typing import Any
 
 from telegram import Update
@@ -83,7 +84,15 @@ async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _edit_or_reply(query, "This offer is unavailable.")
         return
     try:
-        result = await _evaluator(context).evaluate(offer.id, payload.user_id)
+        evaluator = _evaluator(context)
+        wait_seconds = await evaluator.configured_wait_seconds(offer.id)
+        if wait_seconds:
+            logger.info(
+                "offer_verify_wait offer_id=%s user_id=%s wait_seconds=%s",
+                offer.id, payload.user_id, wait_seconds,
+            )
+            await asyncio.sleep(wait_seconds)
+        result = await evaluator.evaluate(offer.id, payload.user_id)
     except Exception as exc:
         logger.exception("verify_offer_evaluation_failed (%s)", type(exc).__name__)
         await _answer_callback(query, "Offer unavailable")

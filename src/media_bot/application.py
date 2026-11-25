@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -56,6 +57,13 @@ async def error_handler(
 ) -> None:
     """Log update failures with traceback while avoiding sensitive payloads."""
     update_id = getattr(update, "update_id", None)
+    if isinstance(context.error, Conflict):
+        logger.critical(
+            "telegram_polling_conflict_fatal instance_pid=%s; stop this instance and keep one authoritative poller",
+            __import__("os").getpid(),
+        )
+        context.application.stop_running()
+        return
     if context.error is not None:
         try:
             raise context.error

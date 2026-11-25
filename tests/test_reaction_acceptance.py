@@ -114,3 +114,23 @@ async def test_any_recent_requires_observed_post_timestamp(database: Database) -
         user_id=USER, channel_id=CHANNEL, last_x_messages=5,
         last_x_days=1_000, now_ms=1_800_000_002_000, required_emoji="👍"
     )
+
+
+@pytest.mark.asyncio
+async def test_campaign_wait_seconds_is_read_from_linked_requirements(database: Database) -> None:
+    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
+    from unittest.mock import AsyncMock
+    evaluator = OfferEvaluator(
+        bot=SimpleNamespace(),
+        offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)),
+        requirement_repo=SimpleNamespace(
+            list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
+            get_requirement=AsyncMock(return_value=SimpleNamespace(
+                id=3, type="REACT", target=str(CHANNEL),
+                settings={"wait_seconds": 10},
+            )),
+        ),
+        reaction_repo=SimpleNamespace(),
+        chat_repo=SimpleNamespace(),
+    )
+    assert await evaluator.configured_wait_seconds(1) == 10
