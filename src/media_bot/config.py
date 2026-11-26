@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -58,9 +58,7 @@ class Settings:
         elif re.fullmatch(r"[0-9]+:[^:\s]+", bot_token) is None:
             errors.append("BOT_TOKEN must have the BotFather token format")
 
-        storage_channel_id = _parse_storage_channel_id(
-            source.get("STORAGE_CHANNEL_ID", ""), errors
-        )
+        storage_channel_id = _parse_storage_channel_id(source.get("STORAGE_CHANNEL_ID", ""), errors)
         admin_ids = _parse_admin_ids(source.get("ADMIN_IDS", ""), errors)
 
         uploader_mode = source.get("UPLOADER_MODE", "admin").strip().lower()
@@ -156,12 +154,7 @@ def _parse_admin_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
     invalid = False
     for raw_part in parts:
         part = raw_part.strip()
-        if (
-            not part
-            or not part.isascii()
-            or not part.isdecimal()
-            or len(part) > 19
-        ):
+        if not part or not part.isascii() or not part.isdecimal() or len(part) > 19:
             invalid = True
             continue
         user_id = int(part)
@@ -180,19 +173,16 @@ def _parse_admin_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
 
 def _parse_uploader_ids(raw_value: str, errors: list[str]) -> tuple[int, ...]:
     if not raw_value.strip():
-        errors.append("UPLOADER_IDS must contain at least one numeric Telegram user ID when UPLOADER_MODE=allowlist")
+        errors.append(
+            "UPLOADER_IDS must contain at least one numeric Telegram user ID when UPLOADER_MODE=allowlist"
+        )
         return ()
     parts = raw_value.split(",")
     parsed: list[int] = []
     invalid = False
     for raw_part in parts:
         part = raw_part.strip()
-        if (
-            not part
-            or not part.isascii()
-            or not part.isdecimal()
-            or len(part) > 19
-        ):
+        if not part or not part.isascii() or not part.isdecimal() or len(part) > 19:
             invalid = True
             continue
         user_id = int(part)
@@ -240,9 +230,7 @@ def _parse_optional_channel_id(raw_value: str, errors: list[str]) -> int | None:
     return channel_id
 
 
-def _parse_optional_nonnegative_int(
-    raw_value: str, field: str, errors: list[str]
-) -> int | None:
+def _parse_optional_nonnegative_int(raw_value: str, field: str, errors: list[str]) -> int | None:
     value = raw_value.strip()
     if not value:
         return None

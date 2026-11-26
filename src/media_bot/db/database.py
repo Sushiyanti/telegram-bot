@@ -6,13 +6,13 @@ import os
 import re
 import sqlite3
 import tempfile
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from pathlib import Path
-from typing import AsyncIterator
 from urllib.parse import quote
 
 import aiosqlite
-from importlib.resources import files
 
 
 class DatabaseError(RuntimeError):
@@ -85,7 +85,9 @@ class Database:
                     raise MigrationError(
                         f"Database schema version {current_version} is newer than this application supports ({latest_version})"
                     )
-                if current_version and current_version not in {version for version, _ in migrations}:
+                if current_version and current_version not in {
+                    version for version, _ in migrations
+                }:
                     raise MigrationError(
                         f"Database schema version {current_version} has no matching migration"
                     )
@@ -203,7 +205,9 @@ class Database:
                     cursor = await target.execute("PRAGMA foreign_keys")
                     row = await cursor.fetchone()
                     if row is None or int(row[0]) != 1:
-                        raise DatabaseError("SQLite foreign-key enforcement could not be enabled for backup")
+                        raise DatabaseError(
+                            "SQLite foreign-key enforcement could not be enabled for backup"
+                        )
                     await source.backup(target)
                     await target.commit()
             await self._validate_database_file(temporary)
@@ -242,12 +246,16 @@ class Database:
                 cursor = await check.execute("PRAGMA foreign_keys")
                 fk_row = await cursor.fetchone()
                 if fk_row is None or int(fk_row[0]) != 1:
-                    raise DatabaseError("SQLite foreign-key enforcement is disabled during restore validation")
+                    raise DatabaseError(
+                        "SQLite foreign-key enforcement is disabled during restore validation"
+                    )
                 cursor = await check.execute("PRAGMA user_version")
                 row = await cursor.fetchone()
                 version = int(row[0]) if row is not None else 0
             if not supported_versions or version not in supported_versions:
-                raise MigrationError("The backup schema version is not supported by this application")
+                raise MigrationError(
+                    "The backup schema version is not supported by this application"
+                )
 
             for suffix in ("-wal", "-shm", "-journal"):
                 Path(str(destination) + suffix).unlink(missing_ok=True)
@@ -281,7 +289,9 @@ class Database:
                 cursor = await connection.execute("PRAGMA foreign_keys")
                 fk_row = await cursor.fetchone()
                 if fk_row is None or int(fk_row[0]) != 1:
-                    raise DatabaseError("SQLite foreign-key enforcement is disabled during validation")
+                    raise DatabaseError(
+                        "SQLite foreign-key enforcement is disabled during validation"
+                    )
                 cursor = await connection.execute("PRAGMA integrity_check")
                 result = await cursor.fetchall()
                 if len(result) != 1 or result[0][0] != "ok":

@@ -7,21 +7,22 @@ per-chat nonce approach without adding persistent state.
 
 from __future__ import annotations
 
-import logging
-import time
 import asyncio
+import logging
 from typing import Any
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from media_bot.db.repositories import OfferRepository, OfferRequirementRepository, RequiredChatRepository
-from media_bot.db.rules import ReactionRepository
+from media_bot.db.repositories import (
+    OfferRepository,
+    OfferRequirementRepository,
+    RequiredChatRepository,
+)
 from media_bot.services.offer_delivery import deliver_offer
 from media_bot.services.offer_evaluator import OfferEvaluator
 from media_bot.services.offer_messaging import render_gate_message
 from media_bot.services.verify_callback import VerifyCallbackPayload
-
 
 logger = logging.getLogger(__name__)
 
@@ -55,60 +56,84 @@ def _evaluator(context: ContextTypes.DEFAULT_TYPE) -> OfferEvaluator:
         bot=context.bot,
         offer_repo=OfferRepository(database),
         requirement_repo=OfferRequirementRepository(database),
-        reaction_repo=ReactionRepository(database),
+        reaction_repo=None,
         chat_repo=RequiredChatRepository(database),
     )
+
+
+def _verify_state(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    return context.application.bot_data.setdefault("verify_state", {})
 
 
 async def verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
-    await _answer_callback(query)
     payload = VerifyCallbackPayload.decode(getattr(query, "data", None))
     if payload is None:
-        await _answer_callback(query, "Invalid or expired button")
+        await _answer_callback(query, "Invalid or expired button", show_alert=True)
         return
     user = getattr(query, "from_user", None)
     if user is None or payload.user_id != int(user.id):
-        await _answer_callback(query, "This button is not for you")
+        await _answer_callback(query, "This button is not for you", show_alert=True)
         return
     if _nonce_store(context).get(payload.offer_id) != payload.nonce:
-        await _answer_callback(query, "Expired, please resend /start")
+        await _answer_callback(query, "Expired, please resend /start", show_alert=True)
         return
+    await _answer_callback(query, "Checking your requirements…")
 
     database = context.application.bot_data["database"]
     offer = await OfferRepository(database).get_by_id(payload.offer_id, active_only=False)
     if offer is None or not offer.is_enabled:
-        await _answer_callback(query, "Offer unavailable")
+        await _answer_callback(query, "Offer unavailable", show_alert=True)
         await _edit_or_reply(query, "This offer is unavailable.")
         return
     try:
         evaluator = _evaluator(context)
-        wait_seconds = await evaluator.configured_wait_seconds(offer.id)
-        if wait_seconds:
-            logger.info(
-                "offer_verify_wait offer_id=%s user_id=%s wait_seconds=%s",
-                offer.id, payload.user_id, wait_seconds,
+        key = f"{offer.id}:{payload.user_id}"
+        state = _verify_state(context)
+        locks = state.setdefault("locks", {})
+        lock = locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if key in state.setdefault("delivered", set()):
+                await _edit_or_reply(query, "Your files were already delivered.")
+                return
+            completed = key in state.setdefault("fake_wait_completed", set())
+            wait_seconds = await evaluator.configured_wait_seconds(offer.id)
+            if wait_seconds and not completed:
+                await _edit_or_reply(
+                    query,
+                    f"Please wait {wait_seconds} seconds while we prepare your files.",
+                )
+                logger.info(
+                    "offer_verify_wait offer_id=%s user_id=%s wait_seconds=%s",
+                    offer.id,
+                    payload.user_id,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                state["fake_wait_completed"].add(key)
+                completed = True
+            result = await evaluator.evaluate(
+                offer.id, payload.user_id, fake_wait_completed=completed
             )
-            await asyncio.sleep(wait_seconds)
-        result = await evaluator.evaluate(offer.id, payload.user_id)
+            if not result.all_passed:
+                text, markup = render_gate_message(offer, result)
+                remember_verify_nonce(context, markup)
+                await _edit_or_reply(query, text, reply_markup=markup)
+                return
+            outcome = await deliver_offer(context, offer, payload.user_id)
+            if outcome.ok:
+                state["delivered"].add(key)
+                await _edit_or_reply(query, "Unlocked. Your files were delivered.")
+            else:
+                await _edit_or_reply(query, "Delivery failed. Please try again later.")
+            return
     except Exception as exc:
         logger.exception("verify_offer_evaluation_failed (%s)", type(exc).__name__)
-        await _answer_callback(query, "Offer unavailable")
+        await _answer_callback(query, "Offer unavailable", show_alert=True)
         await _edit_or_reply(query, "This offer is temporarily unavailable.")
         return
-    if not result.all_passed:
-        text, markup = render_gate_message(offer, result)
-        remember_verify_nonce(context, markup)
-        await _edit_or_reply(query, text, reply_markup=markup)
-        return
-
-    outcome = await deliver_offer(context, offer, payload.user_id)
-    if outcome.ok:
-        await _edit_or_reply(query, "Unlocked. Your files were delivered.")
-    else:
-        await _edit_or_reply(query, "Delivery failed. Please try again later.")
 
 
 async def _edit_or_reply(query: Any, text: str, *, reply_markup: Any = None) -> None:

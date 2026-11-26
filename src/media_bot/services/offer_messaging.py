@@ -15,12 +15,18 @@ from media_bot.services.offer_evaluator import OfferEvaluationResult, OfferGateK
 from media_bot.services.verify_callback import VerifyCallbackPayload
 
 
-def render_gate_message(offer: Any, result: OfferEvaluationResult) -> tuple[str, InlineKeyboardMarkup]:
+def render_gate_message(
+    offer: Any, result: OfferEvaluationResult
+) -> tuple[str, InlineKeyboardMarkup]:
     """Return stable instructions and buttons for every unmet gate."""
     if result.all_passed:
         raise ValueError("all_passed")
 
-    lines = [str(getattr(offer, "title", "Offer")), "", "To unlock, complete the steps below:"]
+    lines = [
+        str(getattr(offer, "title", "Offer")),
+        "",
+        "To unlock, complete the steps below:",
+    ]
     keyboard: list[list[InlineKeyboardButton]] = []
     for gate in result.unmet_gates:
         lines.append(f"• {gate.target_label}")
@@ -29,16 +35,24 @@ def render_gate_message(offer: Any, result: OfferEvaluationResult) -> tuple[str,
                 keyboard.append([InlineKeyboardButton(f"Join {gate.target_label}", url=gate.url)])
             else:
                 lines.append("⚠ This required chat has no valid invite link.")
-                keyboard.append([InlineKeyboardButton("Report issue", callback_data=f"report:{result.offer_id}")])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "Report issue", callback_data=f"report:{result.offer_id}"
+                        )
+                    ]
+                )
         elif gate.url is not None:
             keyboard.append([InlineKeyboardButton(f"Open {gate.target_label}", url=gate.url)])
 
     if result.has_misconfigured_gate:
-        lines.extend([
-            "",
-            "This offer is temporarily unavailable — the administrator needs to fix the required channel's join link.",
-            "Reason: misconfigured.",
-        ])
+        lines.extend(
+            [
+                "",
+                "This offer is temporarily unavailable — the administrator needs to fix the required channel's join link.",
+                "Reason: misconfigured.",
+            ]
+        )
     if result.has_unavailable_gate:
         lines.extend(["", "This requirement is currently unavailable. Please try again later."])
 

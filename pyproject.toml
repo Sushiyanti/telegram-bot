@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "telegram-private-media-bot"
 version = "0.1.0"
-description = "Private Telegram media storage and access-control bot"
+description = "Public Telegram advertise-to-unlock marketing bot"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -21,6 +21,7 @@ telegram-storage-bot = "media_bot.__main__:main"
 dev = [
     "pytest>=8.3,<10",
     "pytest-asyncio>=1.0,<2",
+    "ruff>=0.9,<1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -32,6 +33,13 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.uv]
 package = true

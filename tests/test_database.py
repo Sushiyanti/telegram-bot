@@ -1,8 +1,8 @@
 """Network-free tests for SQLite schema, repositories, and backup recovery."""
 
+import secrets
 from dataclasses import replace
 from pathlib import Path
-import secrets
 from unittest.mock import patch
 
 import aiosqlite
@@ -51,7 +51,9 @@ def make_item(size: int | None = 123) -> MediaItem:
     )
 
 
-async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_path: Path) -> None:
+async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(
+    tmp_path: Path,
+) -> None:
     db = Database(tmp_path / "nested" / "bot.sqlite3", busy_timeout_ms=2300)
     await db.initialize()
     async with db.connection() as connection:
@@ -59,9 +61,9 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
         journal = await (await connection.execute("PRAGMA journal_mode")).fetchone()
         foreign_keys = await (await connection.execute("PRAGMA foreign_keys")).fetchone()
         timeout = await (await connection.execute("PRAGMA busy_timeout")).fetchone()
-        tables = await (await connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )).fetchall()
+        tables = await (
+            await connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        ).fetchall()
     assert version[0] == 10
     assert journal[0].lower() == "wal"
     assert foreign_keys[0] == 1
@@ -87,7 +89,11 @@ async def test_fresh_initialization_sets_wal_foreign_keys_and_busy_timeout(tmp_p
     }
     async with db.connection() as connection:
         admin_columns = await (await connection.execute("PRAGMA table_info(admins)")).fetchall()
-    assert [row["name"] for row in admin_columns] == ["user_id", "added_by", "created_at"]
+    assert [row["name"] for row in admin_columns] == [
+        "user_id",
+        "added_by",
+        "created_at",
+    ]
     assert db.path.stat().st_mode & 0o777 == 0o600
 
 
@@ -96,14 +102,16 @@ async def test_migration_repeatability_is_idempotent(database: Database) -> None
     await database.initialize()
     async with database.connection() as connection:
         version = await (await connection.execute("PRAGMA user_version")).fetchone()
-        indexes = await (await connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'"
-        )).fetchall()
+        indexes = await (
+            await connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        ).fetchall()
     assert version[0] == 10
     assert len([row[0] for row in indexes if row[0] == "share_links_by_item_id"]) == 1
 
 
-async def test_version_one_database_applies_audit_and_upload_migrations(tmp_path: Path) -> None:
+async def test_version_one_database_applies_audit_and_upload_migrations(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "legacy-v1.db"
     migration = Path(__file__).resolve().parents[1] / "src/media_bot/db/migrations/0001_initial.sql"
     async with aiosqlite.connect(path) as connection:
@@ -115,13 +123,11 @@ async def test_version_one_database_applies_audit_and_upload_migrations(tmp_path
 
     async with database.connection() as connection:
         version = await (await connection.execute("PRAGMA user_version")).fetchone()
-        tables = await (await connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )).fetchall()
+        tables = await (
+            await connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        ).fetchall()
     assert version[0] == 10
-    assert {"audit_log", "item_files", "item_file_fingerprints"} <= {
-        row[0] for row in tables
-    }
+    assert {"audit_log", "item_files", "item_file_fingerprints"} <= {row[0] for row in tables}
 
 
 async def test_version_two_database_applies_upload_migration(tmp_path: Path) -> None:
@@ -157,7 +163,9 @@ async def test_foreign_key_enforcement_rejects_missing_item(database: Database) 
             )
 
 
-async def test_item_and_storage_message_persist_after_close_and_reopen(tmp_path: Path) -> None:
+async def test_item_and_storage_message_persist_after_close_and_reopen(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "persistent.sqlite3"
     first = Database(path)
     await first.initialize()
@@ -177,9 +185,7 @@ async def test_invalid_or_inconsistent_records_are_rejected(database: Database) 
     with pytest.raises(InvalidRecord):
         await repository.create_stored_item(make_item(-1))
     with pytest.raises(InvalidRecord):
-        await repository.create_stored_item(
-            MediaItem(123456789, "document", 1, ())
-        )
+        await repository.create_stored_item(MediaItem(123456789, "document", 1, ()))
     item = await repository.create_stored_item(make_item())
     assert item.id is not None
     async with database.connection() as connection:
@@ -217,7 +223,9 @@ async def test_required_chats_persist_and_upsert(database: Database) -> None:
     assert await service.list_enabled() == ()
 
 
-async def test_pending_upload_records_are_recoverable_and_transition_safe(database: Database) -> None:
+async def test_pending_upload_records_are_recoverable_and_transition_safe(
+    database: Database,
+) -> None:
     service = PendingUploadService(PendingUploadRepository(database))
     first = PendingUploadMessage(
         source_chat_id=123456789,
@@ -280,7 +288,9 @@ async def test_pending_upload_records_are_recoverable_and_transition_safe(databa
         await service.transition(upload.upload_id, "ready", at_ms=1_800_000_006_000)
 
 
-async def test_pending_upload_rejects_source_message_conflicts(database: Database) -> None:
+async def test_pending_upload_rejects_source_message_conflicts(
+    database: Database,
+) -> None:
     repository = PendingUploadRepository(database)
     message = PendingUploadMessage(
         source_chat_id=123456789,
@@ -310,7 +320,9 @@ async def test_pending_upload_rejects_source_message_conflicts(database: Databas
         )
 
 
-async def test_share_link_creation_hashing_lookup_and_revocation(database: Database) -> None:
+async def test_share_link_creation_hashing_lookup_and_revocation(
+    database: Database,
+) -> None:
     items = ItemRepository(database)
     item = await items.create_stored_item(make_item(4_000_000_000))
     links = ShareLinkRepository(database)
@@ -349,7 +361,9 @@ async def test_share_link_default_is_non_expiring(database: Database) -> None:
     assert created.link.expires_at_ms is None
 
 
-async def test_share_token_generation_uses_at_least_256_bits(database: Database) -> None:
+async def test_share_token_generation_uses_at_least_256_bits(
+    database: Database,
+) -> None:
     items = ItemRepository(database)
     item = await items.create_stored_item(make_item())
     service = ShareLinkService(
@@ -399,7 +413,9 @@ async def test_expired_link_is_not_active(database: Database) -> None:
     assert await links.find_active_by_hash(link.token_hash, now_ms=now + 100) is None
 
 
-async def test_unknown_or_excessive_transfer_size_never_creates_share_link(database: Database) -> None:
+async def test_unknown_or_excessive_transfer_size_never_creates_share_link(
+    database: Database,
+) -> None:
     items = ItemRepository(database)
     oversized = await items.create_stored_item(make_item(4_000_000_001))
     links = ShareLinkRepository(database)
@@ -434,7 +450,9 @@ async def test_backup_and_restore_online_snapshot(tmp_path: Path) -> None:
     assert await restored.get(second.id) is None
 
 
-async def test_restore_rejects_invalid_backup_without_replacing_destination(tmp_path: Path) -> None:
+async def test_restore_rejects_invalid_backup_without_replacing_destination(
+    tmp_path: Path,
+) -> None:
     destination = tmp_path / "bot.sqlite3"
     database = Database(destination)
     await database.initialize()

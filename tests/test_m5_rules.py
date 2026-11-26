@@ -1,9 +1,9 @@
 """M5 dynamic rules, multi-category storage, and command policy tests."""
+
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,7 +17,11 @@ from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.admins import AdminRepository
 from media_bot.db.database import Database
 from media_bot.db.models import MediaItem, StorageMessageRef
-from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    ShareLinkRepository,
+    UploaderRepository,
+)
 from media_bot.db.rules import (
     BotSettingsRepository,
     CategoryRepository,
@@ -30,7 +34,10 @@ from media_bot.handlers.categories import (
     delete_category_callback,
     delete_category_command,
 )
-from media_bot.handlers.policy import enforce_user_command_policy, toggle_commands_command
+from media_bot.handlers.policy import (
+    enforce_user_command_policy,
+    toggle_commands_command,
+)
 from media_bot.handlers.reactions import ReactionUpdateHandler
 from media_bot.handlers.sharing import start_command
 from media_bot.handlers.uploads import UploadHandler
@@ -120,7 +127,9 @@ def start_context(database: Database, token: str, bot=None):
     return context, bot
 
 
-async def test_schema_v5_seeds_default_and_backfills_legacy_items(tmp_path: Path) -> None:
+async def test_schema_v5_seeds_default_and_backfills_legacy_items(
+    tmp_path: Path,
+) -> None:
     migrations = Path(__file__).resolve().parents[1] / "src/media_bot/db/migrations"
     path = tmp_path / "v4.db"
     async with aiosqlite.connect(path) as connection:
@@ -150,14 +159,18 @@ async def test_schema_v5_seeds_default_and_backfills_legacy_items(tmp_path: Path
     assert item.storage_channel_id == STORAGE_ID
 
 
-async def test_default_category_is_auto_assigned_for_existing_callers(database: Database) -> None:
+async def test_default_category_is_auto_assigned_for_existing_callers(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     default = await CategoryRepository(database).default()
     assert item.category_id == default.id
     assert item.storage_channel_id == STORAGE_ID
 
 
-async def test_category_link_inherits_child_requirements_and_deduplicates(database: Database) -> None:
+async def test_category_link_inherits_child_requirements_and_deduplicates(
+    database: Database,
+) -> None:
     categories = CategoryRepository(database)
     parent = await categories.create("Parent", -1007012345010)
     child = await categories.create("Child", -1007012345011)
@@ -197,12 +210,16 @@ async def test_global_requirement_applies_to_every_category(database: Database) 
         is_fake=False,
         wait_seconds=0,
     )
-    assert [value.id for value in await CategoryRepository(database).requirements_for(category.id)] == [requirement.id]
+    assert [
+        value.id for value in await CategoryRepository(database).requirements_for(category.id)
+    ] == [requirement.id]
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT category_id FROM category_requirements WHERE requirement_id = ?",
-            (requirement.id,),
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT category_id FROM category_requirements WHERE requirement_id = ?",
+                (requirement.id,),
+            )
+        ).fetchone()
     assert row["category_id"] is None
 
 
@@ -226,17 +243,24 @@ async def test_category_deletion_choice_deletes_or_keeps_orphan_requirements(
     await categories.delete("Temporary", delete_orphaned_requirements=delete_orphaned)
 
     async with database.connection() as connection:
-        count = await (await connection.execute(
-            "SELECT COUNT(*) FROM requirements WHERE id = ?", (requirement.id,)
-        )).fetchone()
-        links = await (await connection.execute(
-            "SELECT COUNT(*) FROM category_requirements WHERE category_id = ?", (category.id,)
-        )).fetchone()
+        count = await (
+            await connection.execute(
+                "SELECT COUNT(*) FROM requirements WHERE id = ?", (requirement.id,)
+            )
+        ).fetchone()
+        links = await (
+            await connection.execute(
+                "SELECT COUNT(*) FROM category_requirements WHERE category_id = ?",
+                (category.id,),
+            )
+        ).fetchone()
     assert int(count[0]) == expected_count
     assert int(links[0]) == 0
 
 
-async def test_category_deletion_keeps_shared_requirement_even_in_delete_orphans_mode(database: Database) -> None:
+async def test_category_deletion_keeps_shared_requirement_even_in_delete_orphans_mode(
+    database: Database,
+) -> None:
     categories = CategoryRepository(database)
     doomed = await categories.create("Doomed", -1007012345021)
     survivor = await categories.create("Survivor", -1007012345022)
@@ -258,7 +282,9 @@ async def test_category_deletion_keeps_shared_requirement_even_in_delete_orphans
     assert await RequirementRepository(database).get(requirement.id) is not None
 
 
-async def test_category_deletion_reassigns_items_and_removes_links(database: Database) -> None:
+async def test_category_deletion_reassigns_items_and_removes_links(
+    database: Database,
+) -> None:
     categories = CategoryRepository(database)
     default = await categories.default()
     removed = await categories.create("StorageA", -1007012345023)
@@ -294,16 +320,20 @@ async def test_category_deletion_reassigns_items_and_removes_links(database: Dat
     assert reassigned.category_id == default.id
     assert reassigned.storage_channel_id == removed.storage_channel_id
     assert reassigned.storage_messages[0].chat_id == removed.storage_channel_id
-    assert (await ShareLinkRepository(database).list_for_item(saved.id))[0].revoked_at_ms is not None
+    assert (await ShareLinkRepository(database).list_for_item(saved.id))[
+        0
+    ].revoked_at_ms is not None
     assert (await ShareLinkRepository(database).list_for_item(survivor.id))[0].revoked_at_ms is None
     retained_survivor = await ItemRepository(database).get(survivor.id)
     assert retained_survivor is not None and retained_survivor.category_id == child.id
     assert retained_survivor.storage_messages[0].chat_id == child.storage_channel_id
     async with database.connection() as connection:
-        rows = await (await connection.execute(
-            "SELECT COUNT(*) FROM category_links WHERE parent_category_id = ? OR child_category_id = ?",
-            (removed.id, removed.id),
-        )).fetchone()
+        rows = await (
+            await connection.execute(
+                "SELECT COUNT(*) FROM category_links WHERE parent_category_id = ? OR child_category_id = ?",
+                (removed.id, removed.id),
+            )
+        ).fetchone()
     assert int(rows[0]) == 0
     assert await categories.get(child.id) is not None
     assert await categories.links_for(child.id) == ((), ())
@@ -314,7 +344,9 @@ async def test_default_category_cannot_be_deleted(database: Database) -> None:
         await CategoryRepository(database).delete("Default", delete_orphaned_requirements=True)
 
 
-async def test_requirement_validation_rejects_real_start_bot(database: Database) -> None:
+async def test_requirement_validation_rejects_real_start_bot(
+    database: Database,
+) -> None:
     default = await CategoryRepository(database).default()
     with pytest.raises(ValueError, match="Real START_BOT verification is not supported"):
         await RequirementRepository(database).create(
@@ -336,7 +368,12 @@ async def test_requirement_validation_rejects_real_start_bot(database: Database)
 
 @pytest.mark.parametrize(
     "link_url",
-    ["http://t.me/channel", "https://example.com/channel", "https://t.me/", "https://user@t.me/channel"],
+    [
+        "http://t.me/channel",
+        "https://example.com/channel",
+        "https://t.me/",
+        "https://user@t.me/channel",
+    ],
 )
 async def test_requirement_rejects_unsafe_prompt_links(database: Database, link_url: str) -> None:
     default = await CategoryRepository(database).default()
@@ -368,7 +405,9 @@ async def test_react_requirement_uses_documented_defaults(database: Database) ->
     }
 
 
-async def test_react_requirement_accepts_configured_message_and_day_windows(database: Database) -> None:
+async def test_react_requirement_accepts_configured_message_and_day_windows(
+    database: Database,
+) -> None:
     default = await CategoryRepository(database).default()
     req = await RequirementRepository(database).create(
         category_id=default.id,
@@ -414,7 +453,9 @@ async def test_addrequirement_command_supports_global_scope(database: Database) 
     assert len(requirements) == 1 and requirements[0].type == "TIMED_WAIT"
 
 
-async def test_start_fake_timed_rule_waits_then_delivers_without_consuming_early(database: Database) -> None:
+async def test_start_fake_timed_rule_waits_then_delivers_without_consuming_early(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -437,7 +478,9 @@ async def test_start_fake_timed_rule_waits_then_delivers_without_consuming_early
     assert link.use_count == 1
 
 
-async def test_real_join_left_refuses_delivery_without_consuming_share_link(database: Database) -> None:
+async def test_real_join_left_refuses_delivery_without_consuming_share_link(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -463,7 +506,9 @@ async def test_real_join_left_refuses_delivery_without_consuming_share_link(data
     assert markup.inline_keyboard[0][0].url == "https://t.me/+RequiredInvite123"
 
 
-async def test_start_fake_join_waits_five_seconds_then_delivers(database: Database) -> None:
+async def test_start_fake_join_waits_five_seconds_then_delivers(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -491,7 +536,9 @@ async def test_start_fake_join_waits_five_seconds_then_delivers(database: Databa
     assert link.use_count == 1
 
 
-async def test_start_fake_join_zero_wait_prompts_then_delivers_immediately(database: Database) -> None:
+async def test_start_fake_join_zero_wait_prompts_then_delivers_immediately(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -518,7 +565,9 @@ async def test_start_fake_join_zero_wait_prompts_then_delivers_immediately(datab
     assert link.use_count == 1
 
 
-async def test_start_fake_timed_wait_zero_delivers_without_sleep(database: Database) -> None:
+async def test_start_fake_timed_wait_zero_delivers_without_sleep(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -541,7 +590,9 @@ async def test_start_fake_timed_wait_zero_delivers_without_sleep(database: Datab
     assert link.use_count == 1
 
 
-async def test_start_real_react_with_database_reaction_delivers(database: Database) -> None:
+async def test_start_real_react_with_database_reaction_delivers(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -552,7 +603,7 @@ async def test_start_real_react_with_database_reaction_delivers(database: Databa
         last_x_messages=5,
         last_x_days=0,
     )
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     reactions = ReactionRepository(database)
     await reactions.observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
     await reactions.replace_user_message_reactions(
@@ -574,7 +625,9 @@ async def test_start_real_react_with_database_reaction_delivers(database: Databa
     assert link.use_count == 1
 
 
-async def test_start_real_react_without_database_reaction_refuses_delivery(database: Database) -> None:
+async def test_start_real_react_without_database_reaction_refuses_delivery(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await RequirementRepository(database).create(
         category_id=item.category_id,
@@ -586,7 +639,7 @@ async def test_start_real_react_without_database_reaction_refuses_delivery(datab
         last_x_days=0,
         link_url="https://t.me/requiredchannel",
     )
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     await ReactionRepository(database).observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
     token = await share_token(database, item.id)
     update, message = start_update(token)
@@ -618,7 +671,7 @@ async def test_start_real_react_with_no_message_limit_still_requires_any_observe
         last_x_messages=0,
         last_x_days=0,
     )
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     reactions = ReactionRepository(database)
     await reactions.observe_post(REACT_CHANNEL, 701, now_ms - 1_000)
     if has_reaction:
@@ -645,7 +698,9 @@ async def test_start_real_react_with_no_message_limit_still_requires_any_observe
         assert "React to at least one recent post" in message.reply_text.await_args.args[0]
 
 
-async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(database: Database) -> None:
+async def test_join_api_failure_falls_back_to_configured_wait_and_delivers(
+    database: Database,
+) -> None:
     item = await ItemRepository(database).create_stored_item(make_item())
     await BotSettingsRepository(database).set_real_check_failure_policy(
         BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK
@@ -735,18 +790,22 @@ async def test_fake_join_skips_telegram_membership_api(database: Database) -> No
     evaluator = RequirementEvaluator(database)
     message = SimpleNamespace(reply_text=AsyncMock())
     with patch("media_bot.services.rule_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
-        result = await evaluator.verify(category_id=category.id, user_id=USER_ID, bot=bot, message=message)
+        result = await evaluator.verify(
+            category_id=category.id, user_id=USER_ID, bot=bot, message=message
+        )
     assert result is True
     bot.get_chat_member.assert_not_awaited()
     sleep.assert_awaited_once_with(1)
 
 
-async def test_reaction_updates_are_durable_and_removal_revokes_eligibility(database: Database) -> None:
+async def test_reaction_updates_are_durable_and_removal_revokes_eligibility(
+    database: Database,
+) -> None:
     repository = ReactionRepository(database)
     handler = ReactionUpdateHandler(database)
-    posted_at = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    posted_at = datetime(2026, 11, 20, tzinfo=UTC)
     await repository.observe_post(REACT_CHANNEL, 701, int(posted_at.timestamp() * 1000))
-    date = datetime(2026, 11, 21, tzinfo=timezone.utc)
+    date = datetime(2026, 11, 21, tzinfo=UTC)
     reaction = SimpleNamespace(type="emoji", emoji="👍")
     change = SimpleNamespace(
         user=SimpleNamespace(id=USER_ID),
@@ -757,66 +816,98 @@ async def test_reaction_updates_are_durable_and_removal_revokes_eligibility(data
     )
     await handler.handle_update(SimpleNamespace(channel_post=None, message_reaction=change), None)
     assert await repository.has_recent_reaction(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, last_x_messages=5,
-        last_x_days=0, now_ms=int(date.timestamp() * 1000),
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        last_x_messages=5,
+        last_x_days=0,
+        now_ms=int(date.timestamp() * 1000),
     )
 
     change.new_reaction = []
     await handler.handle_update(SimpleNamespace(channel_post=None, message_reaction=change), None)
     assert not await repository.has_recent_reaction(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, last_x_messages=5,
-        last_x_days=0, now_ms=int(date.timestamp() * 1000),
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        last_x_messages=5,
+        last_x_days=0,
+        now_ms=int(date.timestamp() * 1000),
     )
 
 
-async def test_reactions_for_unobserved_historical_posts_are_not_backfilled(database: Database) -> None:
+async def test_reactions_for_unobserved_historical_posts_are_not_backfilled(
+    database: Database,
+) -> None:
     handler = ReactionUpdateHandler(database)
     change = SimpleNamespace(
         user=SimpleNamespace(id=USER_ID),
         chat=SimpleNamespace(id=REACT_CHANNEL),
         message_id=800,
         new_reaction=[SimpleNamespace(type="emoji", emoji="❤️")],
-        date=datetime(2026, 11, 21, tzinfo=timezone.utc),
+        date=datetime(2026, 11, 21, tzinfo=UTC),
     )
     await handler.handle_update(SimpleNamespace(channel_post=None, message_reaction=change), None)
     assert not await ReactionRepository(database).has_recent_reaction(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, last_x_messages=5,
-        last_x_days=0, now_ms=int(change.date.timestamp() * 1000),
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        last_x_messages=5,
+        last_x_days=0,
+        now_ms=int(change.date.timestamp() * 1000),
     )
 
 
-async def test_react_verification_requires_one_of_last_n_observed_posts(database: Database) -> None:
+async def test_react_verification_requires_one_of_last_n_observed_posts(
+    database: Database,
+) -> None:
     repository = ReactionRepository(database)
     now_ms = 1_800_000_000_000
     for message_id in range(1, 4):
         await repository.observe_post(REACT_CHANNEL, message_id, now_ms + message_id)
     await repository.replace_user_message_reactions(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, message_id=1,
-        emojis=("👍",), updated_at_ms=now_ms + 10,
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        message_id=1,
+        emojis=("👍",),
+        updated_at_ms=now_ms + 10,
     )
     assert not await repository.has_recent_reaction(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, last_x_messages=2,
-        last_x_days=0, now_ms=now_ms + 20,
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        last_x_messages=2,
+        last_x_days=0,
+        now_ms=now_ms + 20,
     )
     await repository.replace_user_message_reactions(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, message_id=3,
-        emojis=("❤️",), updated_at_ms=now_ms + 20,
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        message_id=3,
+        emojis=("❤️",),
+        updated_at_ms=now_ms + 20,
     )
     assert await repository.has_recent_reaction(
-        user_id=USER_ID, channel_id=REACT_CHANNEL, last_x_messages=2,
-        last_x_days=0, now_ms=now_ms + 20,
+        user_id=USER_ID,
+        channel_id=REACT_CHANNEL,
+        last_x_messages=2,
+        last_x_days=0,
+        now_ms=now_ms + 20,
     )
 
 
-async def test_togglecommands_and_policy_lock_regular_commands_but_allow_only_start(database: Database) -> None:
+async def test_togglecommands_and_policy_lock_regular_commands_but_allow_only_start(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     assert await BotSettingsRepository(database).user_commands_enabled()
     assert await BotSettingsRepository(database).toggle_user_commands() is False
 
     def context():
-        return SimpleNamespace(application=SimpleNamespace(bot_data={
-            "database": database, "settings": settings(database),
-        }))
+        return SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "database": database,
+                    "settings": settings(database),
+                }
+            )
+        )
 
     disallowed = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
@@ -824,7 +915,9 @@ async def test_togglecommands_and_policy_lock_regular_commands_but_allow_only_st
     )
     with pytest.raises(ApplicationHandlerStop):
         await enforce_user_command_policy(disallowed, context())
-    disallowed.effective_message.reply_text.assert_awaited_once_with("Commands are currently locked.")
+    disallowed.effective_message.reply_text.assert_awaited_once_with(
+        "Commands are currently locked."
+    )
 
     allowed = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
@@ -845,9 +938,14 @@ async def test_togglecommands_and_policy_lock_regular_commands_but_allow_only_st
 async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) -> None:
     configure_admin_ids((ADMIN_ID,))
     await BotSettingsRepository(database).toggle_user_commands()
-    context = SimpleNamespace(application=SimpleNamespace(bot_data={
-        "database": database, "settings": settings(database),
-    }))
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                "database": database,
+                "settings": settings(database),
+            }
+        )
+    )
     media_update = SimpleNamespace(
         effective_user=SimpleNamespace(id=USER_ID),
         effective_message=SimpleNamespace(photo=[object()], reply_text=AsyncMock()),
@@ -876,17 +974,21 @@ async def test_policy_locks_media_uploads_but_admins_bypass(database: Database) 
     uploader_update.effective_message.reply_text.assert_not_awaited()
 
 
-async def test_database_admin_bypasses_command_and_media_lockdown(database: Database) -> None:
+async def test_database_admin_bypasses_command_and_media_lockdown(
+    database: Database,
+) -> None:
     configure_admin_ids(())
     database_admin_id = 601003
-    assert await AdminRepository(database).add(
-        user_id=database_admin_id, added_by=ADMIN_ID
-    )
+    assert await AdminRepository(database).add(user_id=database_admin_id, added_by=ADMIN_ID)
     await BotSettingsRepository(database).set_user_commands_enabled(False)
-    context = SimpleNamespace(application=SimpleNamespace(bot_data={
-        "database": database,
-        "settings": replace(settings(database), admin_ids=()),
-    }))
+    context = SimpleNamespace(
+        application=SimpleNamespace(
+            bot_data={
+                "database": database,
+                "settings": replace(settings(database), admin_ids=()),
+            }
+        )
+    )
     command = SimpleNamespace(
         effective_user=SimpleNamespace(id=database_admin_id),
         effective_message=SimpleNamespace(text="/share 12", reply_text=AsyncMock()),
@@ -918,9 +1020,7 @@ async def test_delcategory_requires_inline_choice_and_applies_selected_orphan_po
         wait_seconds=0,
     )
     message = SimpleNamespace(reply_text=AsyncMock())
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=ADMIN_ID), effective_message=message
-    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=ADMIN_ID), effective_message=message)
     context = SimpleNamespace(
         args=["RemoveMe"],
         application=SimpleNamespace(bot_data={"database": database}),
@@ -937,7 +1037,9 @@ async def test_delcategory_requires_inline_choice_and_applies_selected_orphan_po
         edit_message_text=AsyncMock(),
         message=SimpleNamespace(),
     )
-    callback_update = SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=ADMIN_ID))
+    callback_update = SimpleNamespace(
+        callback_query=query, effective_user=SimpleNamespace(id=ADMIN_ID)
+    )
     callback_context = SimpleNamespace(application=SimpleNamespace(bot_data={"database": database}))
     await delete_category_callback(callback_update, callback_context)
     stored = await RequirementRepository(database).get(requirement.id)
@@ -945,14 +1047,19 @@ async def test_delcategory_requires_inline_choice_and_applies_selected_orphan_po
     assert await categories.get(category.id) is None
 
 
-async def test_category_selection_is_persisted_owner_checked_and_resumed(database: Database) -> None:
+async def test_category_selection_is_persisted_owner_checked_and_resumed(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     chosen = await CategoryRepository(database).create("Archive", -1007012345040)
     upload_handler = UploadHandler(settings(database), database)
     bot = bot_stub()
     media = SimpleNamespace(
-        file_id="upload-file", file_unique_id="upload-unique", file_size=50,
-        file_name="a.bin", mime_type="application/octet-stream",
+        file_id="upload-file",
+        file_unique_id="upload-unique",
+        file_size=50,
+        file_name="a.bin",
+        mime_type="application/octet-stream",
     )
     message = SimpleNamespace(
         chat=SimpleNamespace(id=ADMIN_ID, type="private"),
@@ -983,13 +1090,17 @@ async def test_category_selection_is_persisted_owner_checked_and_resumed(databas
         answer=AsyncMock(),
         message=message,
     )
-    bad_update = SimpleNamespace(callback_query=bad_query, effective_user=SimpleNamespace(id=USER_ID))
+    bad_update = SimpleNamespace(
+        callback_query=bad_query, effective_user=SimpleNamespace(id=USER_ID)
+    )
     app_context = SimpleNamespace(
         bot=bot,
-        application=SimpleNamespace(bot_data={
-            "database": database,
-            "upload_handler": upload_handler,
-        }),
+        application=SimpleNamespace(
+            bot_data={
+                "database": database,
+                "upload_handler": upload_handler,
+            }
+        ),
     )
     await category_selection_callback(bad_update, app_context)
     bad_query.answer.assert_awaited_once()
@@ -997,9 +1108,7 @@ async def test_category_selection_is_persisted_owner_checked_and_resumed(databas
 
     # Recovery must re-present the selector and must not copy the pending file.
     recovery_bot = bot_stub()
-    await UploadHandler(settings(database), database).recover(
-        SimpleNamespace(bot=recovery_bot)
-    )
+    await UploadHandler(settings(database), database).recover(SimpleNamespace(bot=recovery_bot))
     recovery_bot.send_message.assert_awaited_once()
     recovery_bot.copy_message.assert_not_awaited()
 
@@ -1008,7 +1117,9 @@ async def test_category_selection_is_persisted_owner_checked_and_resumed(databas
         answer=AsyncMock(),
         message=message,
     )
-    good_update = SimpleNamespace(callback_query=good_query, effective_user=SimpleNamespace(id=ADMIN_ID))
+    good_update = SimpleNamespace(
+        callback_query=good_query, effective_user=SimpleNamespace(id=ADMIN_ID)
+    )
     await category_selection_callback(good_update, app_context)
     bot.copy_message.assert_awaited_once_with(
         chat_id=chosen.storage_channel_id,
@@ -1021,16 +1132,12 @@ async def test_category_selection_is_persisted_owner_checked_and_resumed(databas
     assert stored.storage_channel_id == chosen.storage_channel_id
 
 
-async def test_togglecommands_admin_command_flips_persisted_setting(database: Database) -> None:
+async def test_togglecommands_admin_command_flips_persisted_setting(
+    database: Database,
+) -> None:
     message = SimpleNamespace(reply_text=AsyncMock())
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=ADMIN_ID), effective_message=message
-    )
-    context = SimpleNamespace(
-        args=[], application=SimpleNamespace(bot_data={"database": database})
-    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=ADMIN_ID), effective_message=message)
+    context = SimpleNamespace(args=[], application=SimpleNamespace(bot_data={"database": database}))
     await toggle_commands_command(update, context)
-    message.reply_text.assert_awaited_once_with(
-        "Regular-user commands and uploads are locked."
-    )
+    message.reply_text.assert_awaited_once_with("Regular-user commands and uploads are locked.")
     assert await BotSettingsRepository(database).user_commands_enabled() is False

@@ -1,6 +1,7 @@
 """Regression tests for the public Campaigns admin-panel smoke-test fixes."""
-from types import SimpleNamespace
+
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +25,9 @@ def test_t1_configured_username_produces_real_deep_link_username() -> None:
     context = _context(bot_username="MarketingBot")
     username = _panel_bot_username(context)
     assert username == "MarketingBot"
-    assert f"https://t.me/{username}?start=offer-slug" == "https://t.me/MarketingBot?start=offer-slug"
+    assert (
+        f"https://t.me/{username}?start=offer-slug" == "https://t.me/MarketingBot?start=offer-slug"
+    )
 
 
 def test_t2_placeholder_or_missing_username_is_not_rendered() -> None:
@@ -60,9 +63,15 @@ async def test_t7_empty_requirement_registry_is_safe(database: Database) -> None
 
 
 @pytest.mark.asyncio
-async def test_t8_non_empty_requirement_registry_is_listable(database: Database) -> None:
+async def test_t8_non_empty_requirement_registry_is_listable(
+    database: Database,
+) -> None:
     requirement = await RequirementRepository(database).create(
-        category_id=None, requirement_type="REACT", target=-100123456789, is_fake=True, wait_seconds=0
+        category_id=None,
+        requirement_type="REACT",
+        target=-100123456789,
+        is_fake=True,
+        wait_seconds=0,
     )
     values = await RequirementRepository(database).list_all()
     assert [item.id for item in values] == [requirement.id]

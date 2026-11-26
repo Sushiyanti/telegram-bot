@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from transfer_fixture import create_fixture, main, verify_fixture  # noqa: E402
+from transfer_fixture import create_fixture, main, verify_fixture
 
 
 def test_fixture_creation_and_checksum_verification(tmp_path) -> None:
@@ -17,9 +17,7 @@ def test_fixture_creation_and_checksum_verification(tmp_path) -> None:
 
     assert fixture.stat().st_size == 2049
     assert len(checksum) == 64
-    assert (tmp_path / "fixture.bin.sha256").read_text() == (
-        f"{checksum}  fixture.bin\n"
-    )
+    assert (tmp_path / "fixture.bin.sha256").read_text() == (f"{checksum}  fixture.bin\n")
     size, verified_checksum = verify_fixture(fixture, 2049, checksum)
     assert size == 2049
     assert verified_checksum == checksum
@@ -49,13 +47,15 @@ def test_fixture_creation_does_not_overwrite_existing_files(tmp_path) -> None:
 def test_cli_requires_explicit_confirmation_for_large_fixture(tmp_path) -> None:
     fixture = tmp_path / "large.bin"
 
-    result = main([
-        "create",
-        "--output",
-        str(fixture),
-        "--size-bytes",
-        "500000001",
-    ])
+    result = main(
+        [
+            "create",
+            "--output",
+            str(fixture),
+            "--size-bytes",
+            "500000001",
+        ]
+    )
 
     assert result == 2
     assert not fixture.exists()

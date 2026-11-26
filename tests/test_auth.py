@@ -21,9 +21,7 @@ async def database(tmp_path: Path) -> Database:
 
 
 def make_context(database: Database) -> SimpleNamespace:
-    return SimpleNamespace(
-        application=SimpleNamespace(bot_data={"database": database})
-    )
+    return SimpleNamespace(application=SimpleNamespace(bot_data={"database": database}))
 
 
 def make_update(user_id: int) -> SimpleNamespace:
@@ -42,7 +40,9 @@ async def test_is_admin_uses_configured_admin_ids_without_database() -> None:
     assert await is_admin(True) is False
 
 
-async def test_is_admin_uses_database_fallback_and_configured_admin_survives(database: Database) -> None:
+async def test_is_admin_uses_database_fallback_and_configured_admin_survives(
+    database: Database,
+) -> None:
     configure_admin_ids((123456789,))
     admins = AdminRepository(database)
     await admins.seed_configured((123456789,))
@@ -53,7 +53,9 @@ async def test_is_admin_uses_database_fallback_and_configured_admin_survives(dat
     assert await is_admin(123456789, database) is True
 
 
-async def test_configured_admin_seeding_is_idempotent_and_preserves_db_only_roles(database: Database) -> None:
+async def test_configured_admin_seeding_is_idempotent_and_preserves_db_only_roles(
+    database: Database,
+) -> None:
     admins = AdminRepository(database)
     await admins.add(user_id=123456788, added_by=123456789)
 
@@ -63,7 +65,9 @@ async def test_configured_admin_seeding_is_idempotent_and_preserves_db_only_role
     assert await admins.is_admin(123456789)
 
 
-async def test_admin_only_allows_configured_admin_without_audit(database: Database) -> None:
+async def test_admin_only_allows_configured_admin_without_audit(
+    database: Database,
+) -> None:
     configure_admin_ids((123456789,))
     calls: list[int] = []
 

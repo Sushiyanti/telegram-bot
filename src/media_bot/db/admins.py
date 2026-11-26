@@ -1,9 +1,10 @@
 """Persistence for database-backed administrator roles."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from media_bot.db.database import Database
 from media_bot.db.repositories import InvalidRecord, _require_positive_int
@@ -50,9 +51,7 @@ class AdminRepository:
     async def is_admin(self, user_id: int) -> bool:
         _require_positive_int(user_id, "user_id")
         async with self.database.connection() as connection:
-            cursor = await connection.execute(
-                "SELECT 1 FROM admins WHERE user_id = ?", (user_id,)
-            )
+            cursor = await connection.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
             return await cursor.fetchone() is not None
 
     async def list_all(self) -> tuple[AdminGrant, ...]:
@@ -65,9 +64,7 @@ class AdminRepository:
     ) -> tuple[int, tuple[AdminGrant, ...]]:
         _validate_page(offset, limit)
         async with self.database.connection() as connection:
-            total_row = await (await connection.execute(
-                "SELECT COUNT(*) FROM admins"
-            )).fetchone()
+            total_row = await (await connection.execute("SELECT COUNT(*) FROM admins")).fetchone()
             cursor = await connection.execute(
                 "SELECT user_id, added_by, created_at FROM admins ORDER BY user_id LIMIT ? OFFSET ?",
                 (limit, offset),
@@ -78,7 +75,8 @@ class AdminRepository:
                 user_id=int(row["user_id"]),
                 added_by=None if row["added_by"] is None else int(row["added_by"]),
                 created_at=str(row["created_at"]),
-            ) for row in rows
+            )
+            for row in rows
         )
 
     async def add(self, *, user_id: int, added_by: int) -> bool:
@@ -88,9 +86,7 @@ class AdminRepository:
         created_at = _now_iso()
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            await connection.execute(
-                "INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,)
-            )
+            await connection.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
             cursor = await connection.execute(
                 """INSERT INTO admins (user_id, added_by, created_at)
                    VALUES (?, ?, ?) ON CONFLICT(user_id) DO NOTHING""",
@@ -113,9 +109,7 @@ class AdminRepository:
         _require_positive_int(removed_by, "removed_by")
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                "DELETE FROM admins WHERE user_id = ?", (user_id,)
-            )
+            cursor = await connection.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
             changed = cursor.rowcount == 1
             action = "admin_removed" if changed else "admin_remove_missing"
             await connection.execute(
@@ -129,11 +123,11 @@ class AdminRepository:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _now_ms() -> int:
-    return int(datetime.now(timezone.utc).timestamp() * 1000)
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def _validate_page(offset: int, limit: int) -> None:

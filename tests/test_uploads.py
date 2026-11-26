@@ -8,13 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from media_bot.application import build_application
 from media_bot.config import Settings
 from media_bot.db.database import Database
 from media_bot.db.models import PendingUploadMessage
 from media_bot.db.repositories import ItemRepository, UploaderRepository
 from media_bot.handlers.uploads import UploadHandler
-
 
 ADMIN_ID = 12345
 ALLOWLIST_ID = 23456
@@ -103,9 +101,7 @@ def make_update(
         message.photo = [media]
     else:
         setattr(message, media_type, media)
-    update = SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id), effective_message=message
-    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=user_id), effective_message=message)
     return update, message
 
 
@@ -115,16 +111,12 @@ def make_context(bot):
 
 async def audit_rows(database: Database):
     async with database.connection() as connection:
-        return await (
-            await connection.execute("SELECT * FROM audit_log ORDER BY id")
-        ).fetchall()
+        return await (await connection.execute("SELECT * FROM audit_log ORDER BY id")).fetchall()
 
 
 async def pending_count(database: Database) -> int:
     async with database.connection() as connection:
-        row = await (
-            await connection.execute("SELECT COUNT(*) FROM pending_uploads")
-        ).fetchone()
+        row = await (await connection.execute("SELECT COUNT(*) FROM pending_uploads")).fetchone()
     return int(row[0])
 
 
@@ -147,9 +139,7 @@ async def test_uploader_gating_modes(
 ) -> None:
     database = Database(tmp_path / f"{mode}-{user_id}.db")
     await database.initialize()
-    settings = make_settings(
-        database.path, mode=mode, uploader_ids=uploader_ids
-    )
+    settings = make_settings(database.path, mode=mode, uploader_ids=uploader_ids)
     handler = UploadHandler(settings, database)
     bot = make_bot()
     update, message = make_update(user_id=user_id)
@@ -185,9 +175,7 @@ async def test_early_rejections_do_not_copy_or_leave_pending_rows(
     expected_reason: str,
     expected_reply: str,
 ) -> None:
-    handler = UploadHandler(
-        make_settings(database.path, max_bytes=50), database
-    )
+    handler = UploadHandler(make_settings(database.path, max_bytes=50), database)
     bot = make_bot()
     update, message = make_update(file_size=file_size, protected=protected)
 
@@ -249,9 +237,7 @@ async def test_early_rejection_discards_already_buffered_album_parts(
 async def test_single_document_success_persists_metadata_and_safe_confirmation(
     database: Database,
 ) -> None:
-    handler = UploadHandler(
-        make_settings(database.path, protect_default=True), database
-    )
+    handler = UploadHandler(make_settings(database.path, protect_default=True), database)
     bot = make_bot(single_id=98765)
     update, message = make_update(
         file_id="synthetic-private-file-id",
@@ -316,9 +302,7 @@ async def test_recovery_uses_source_chat_id_for_pending_m2_upload(
 
     await handler.recover(application)
 
-    assert tuple(handler._album_tasks) == (
-        (source_chat_id, "synthetic-recovered-album"),
-    )
+    assert tuple(handler._album_tasks) == ((source_chat_id, "synthetic-recovered-album"),)
     await handler.shutdown(application)
     assert await pending_count(database) == 1
 
@@ -361,9 +345,7 @@ async def test_recovery_ignores_legacy_pending_uploads(database: Database) -> No
     "media_type",
     ["document", "photo", "video", "audio", "voice", "animation", "video_note"],
 )
-async def test_supported_media_types_are_accepted(
-    tmp_path: Path, media_type: str
-) -> None:
+async def test_supported_media_types_are_accepted(tmp_path: Path, media_type: str) -> None:
     database = Database(tmp_path / f"{media_type}.db")
     await database.initialize()
     handler = UploadHandler(make_settings(database.path), database)
@@ -382,9 +364,7 @@ async def test_supported_media_types_are_accepted(
 async def test_album_debounce_uses_one_copy_messages_call_and_persists_one_item(
     database: Database,
 ) -> None:
-    handler = UploadHandler(
-        make_settings(database.path), database, debounce_seconds=0.02
-    )
+    handler = UploadHandler(make_settings(database.path), database, debounce_seconds=0.02)
     bot = make_bot(album_ids=(901, 902, 903))
     messages = []
     for index, size in enumerate((10, 20, 30)):
@@ -430,9 +410,7 @@ async def test_album_debounce_uses_one_copy_messages_call_and_persists_one_item(
 async def test_album_partial_copy_is_rejected_without_item_or_pending_rows(
     database: Database,
 ) -> None:
-    handler = UploadHandler(
-        make_settings(database.path), database, debounce_seconds=0.01
-    )
+    handler = UploadHandler(make_settings(database.path), database, debounce_seconds=0.01)
     bot = make_bot(album_ids=(901, 902))
     bot.copy_messages.return_value = (SimpleNamespace(message_id=901),)
     messages = []

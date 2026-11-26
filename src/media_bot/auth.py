@@ -16,16 +16,13 @@ from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
 from media_bot.db.repositories import UploaderRepository
 
-
 logger = logging.getLogger(__name__)
 CommandHandlerFunction = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
 def _valid_user_id(user_id: int) -> bool:
     return (
-        not isinstance(user_id, bool)
-        and isinstance(user_id, int)
-        and 0 < user_id <= (1 << 63) - 1
+        not isinstance(user_id, bool) and isinstance(user_id, int) and 0 < user_id <= (1 << 63) - 1
     )
 
 
@@ -66,6 +63,7 @@ async def can_upload_with_registry(
 
 def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:
     """Refuse non-admin calls, appending a denial event to the audit log."""
+
     @wraps(handler)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
@@ -84,9 +82,7 @@ def admin_only(handler: CommandHandlerFunction) -> CommandHandlerFunction:
                         target_id=handler.__name__,
                     )
                 except Exception as exc:
-                    logger.error(
-                        "admin_denied audit write failed (%s)", type(exc).__name__
-                    )
+                    logger.error("admin_denied audit write failed (%s)", type(exc).__name__)
 
         message = update.effective_message
         if message is not None:

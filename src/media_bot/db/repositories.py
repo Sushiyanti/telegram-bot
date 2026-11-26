@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import sqlite3
 import hmac
 import re
-from datetime import datetime, timezone
+import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import aiosqlite
 
@@ -67,15 +67,19 @@ def _require_time(value: int, field: str) -> None:
 
 
 def _validate_file_size(value: int | None) -> None:
-    if value is not None and (
-        isinstance(value, bool) or not isinstance(value, int) or value < 0
-    ):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
         raise InvalidRecord("file_size_bytes must be a non-negative integer or None")
 
 
 def _validate_text(value: str, field: str, *, max_length: int, allow_empty: bool = False) -> None:
-    if not isinstance(value, str) or len(value) > max_length or (not allow_empty and not value.strip()):
-        raise InvalidRecord(f"{field} must be non-empty text no longer than {max_length} characters")
+    if (
+        not isinstance(value, str)
+        or len(value) > max_length
+        or (not allow_empty and not value.strip())
+    ):
+        raise InvalidRecord(
+            f"{field} must be non-empty text no longer than {max_length} characters"
+        )
 
 
 class ItemRepository:
@@ -112,12 +116,23 @@ class ItemRepository:
         sequences: set[int] = set()
         references: set[tuple[int, int]] = set()
         for reference in item.storage_messages:
-            if isinstance(reference.chat_id, bool) or not isinstance(reference.chat_id, int) or reference.chat_id == 0:
+            if (
+                isinstance(reference.chat_id, bool)
+                or not isinstance(reference.chat_id, int)
+                or reference.chat_id == 0
+            ):
                 raise InvalidRecord("storage chat IDs must be non-zero integers")
             _require_positive_int(reference.message_id, "storage message ID")
-            if isinstance(reference.sequence, bool) or not isinstance(reference.sequence, int) or reference.sequence < 0:
+            if (
+                isinstance(reference.sequence, bool)
+                or not isinstance(reference.sequence, int)
+                or reference.sequence < 0
+            ):
                 raise InvalidRecord("storage message sequence must be a non-negative integer")
-            if reference.sequence in sequences or (reference.chat_id, reference.message_id) in references:
+            if (
+                reference.sequence in sequences
+                or (reference.chat_id, reference.message_id) in references
+            ):
                 raise InvalidRecord("storage message references must be unique")
             sequences.add(reference.sequence)
             references.add((reference.chat_id, reference.message_id))
@@ -143,8 +158,7 @@ class ItemRepository:
             if stored_file.mime_type is not None:
                 _validate_text(stored_file.mime_type, "mime_type", max_length=256)
         if item.files and (
-            len(item.files) != len(item.storage_messages)
-            or file_sequences != sequences
+            len(item.files) != len(item.storage_messages) or file_sequences != sequences
         ):
             raise InvalidRecord("item files and storage references must have matching sequences")
         now = item.created_at_ms if item.created_at_ms is not None else _now_ms()
@@ -205,7 +219,12 @@ class ItemRepository:
                         """INSERT INTO item_storage_messages
                            (item_id, storage_chat_id, storage_message_id, sequence)
                            VALUES (?, ?, ?, ?)""",
-                        (item_id, reference.chat_id, reference.message_id, reference.sequence),
+                        (
+                            item_id,
+                            reference.chat_id,
+                            reference.message_id,
+                            reference.sequence,
+                        ),
                     )
                 inserted_fingerprints: set[str] = set()
                 for stored_file in item.files:
@@ -245,9 +264,7 @@ class ItemRepository:
                         (clear_pending_upload_id,),
                     )
                     if cursor.rowcount != 1:
-                        raise RecordNotFound(
-                            "Pending upload disappeared before item commit"
-                        )
+                        raise RecordNotFound("Pending upload disappeared before item commit")
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Item or storage-file data violates database constraints") from exc
@@ -272,11 +289,16 @@ class ItemRepository:
                 (item_id,),
             )
             storage_messages = tuple(
-                StorageMessageRef(int(ref["storage_chat_id"]), int(ref["storage_message_id"]), int(ref["sequence"]))
+                StorageMessageRef(
+                    int(ref["storage_chat_id"]),
+                    int(ref["storage_message_id"]),
+                    int(ref["sequence"]),
+                )
                 for ref in await cursor.fetchall()
             )
             cursor = await connection.execute(
-                "SELECT * FROM item_files WHERE item_id = ? ORDER BY sequence", (item_id,)
+                "SELECT * FROM item_files WHERE item_id = ? ORDER BY sequence",
+                (item_id,),
             )
             files = tuple(
                 ItemFile(
@@ -344,9 +366,7 @@ class ItemRepository:
         _require_positive_int(item_id, "item_id")
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
-                "SELECT id FROM items WHERE id = ?", (item_id,)
-            )
+            cursor = await connection.execute("SELECT id FROM items WHERE id = ?", (item_id,))
             if await cursor.fetchone() is None:
                 await connection.rollback()
                 return None
@@ -423,14 +443,30 @@ class ShareLinkRepository:
                     """INSERT INTO share_links
                        (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms, max_uses)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (item_id, token_hash, created_by_user_id, created_at_ms, expires_at_ms, max_uses),
+                    (
+                        item_id,
+                        token_hash,
+                        created_by_user_id,
+                        created_at_ms,
+                        expires_at_ms,
+                        max_uses,
+                    ),
                 )
                 link_id = int(cursor.lastrowid)
         except sqlite3.IntegrityError as exc:
-            raise InvalidRecord("Share link violates uniqueness or foreign-key constraints") from exc
+            raise InvalidRecord(
+                "Share link violates uniqueness or foreign-key constraints"
+            ) from exc
         return ShareLink(
-            link_id, item_id, token_hash, created_by_user_id, created_at_ms,
-            expires_at_ms, None, 0, max_uses
+            link_id,
+            item_id,
+            token_hash,
+            created_by_user_id,
+            created_at_ms,
+            expires_at_ms,
+            None,
+            0,
+            max_uses,
         )
 
     async def find_active_by_hash(self, token_hash: bytes, *, now_ms: int) -> ShareLink | None:
@@ -488,9 +524,9 @@ class ShareLinkRepository:
             if cursor.rowcount != 1:
                 await connection.rollback()
                 return None
-            row = await (await connection.execute(
-                "SELECT * FROM share_links WHERE id = ?", (link_id,)
-            )).fetchone()
+            row = await (
+                await connection.execute("SELECT * FROM share_links WHERE id = ?", (link_id,))
+            ).fetchone()
             await connection.commit()
         return None if row is None else _share_link_from_row(row)
 
@@ -538,11 +574,15 @@ class UploaderRepository:
                 "SELECT * FROM uploaders WHERE user_id = ?", (user_id,)
             )
             row = await cursor.fetchone()
-        return None if row is None else UploaderGrant(
-            user_id=int(row["user_id"]),
-            added_by=None if row["added_by"] is None else int(row["added_by"]),
-            added_at=str(row["added_at"]),
-            revoked_at=row["revoked_at"],
+        return (
+            None
+            if row is None
+            else UploaderGrant(
+                user_id=int(row["user_id"]),
+                added_by=None if row["added_by"] is None else int(row["added_by"]),
+                added_at=str(row["added_at"]),
+                revoked_at=row["revoked_at"],
+            )
         )
 
     async def list_active_page(
@@ -553,9 +593,9 @@ class UploaderRepository:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise InvalidRecord("limit must be between 1 and 1,000")
         async with self.database.connection() as connection:
-            count_row = await (await connection.execute(
-                "SELECT COUNT(*) FROM uploaders WHERE revoked_at IS NULL"
-            )).fetchone()
+            count_row = await (
+                await connection.execute("SELECT COUNT(*) FROM uploaders WHERE revoked_at IS NULL")
+            ).fetchone()
             cursor = await connection.execute(
                 """SELECT user_id, added_by, added_at, revoked_at FROM uploaders
                    WHERE revoked_at IS NULL ORDER BY user_id LIMIT ? OFFSET ?""",
@@ -568,7 +608,8 @@ class UploaderRepository:
                 added_by=None if row["added_by"] is None else int(row["added_by"]),
                 added_at=str(row["added_at"]),
                 revoked_at=row["revoked_at"],
-            ) for row in rows
+            )
+            for row in rows
         )
 
     async def add(self, *, user_id: int, added_by: int | None) -> bool:
@@ -577,7 +618,7 @@ class UploaderRepository:
         if added_by is not None:
             _require_positive_int(added_by, "added_by")
         now_ms = _now_ms()
-        added_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        added_at = datetime.now(UTC).isoformat(timespec="seconds")
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             await connection.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
@@ -611,7 +652,7 @@ class UploaderRepository:
         _require_positive_int(user_id, "user_id")
         _require_positive_int(revoked_by, "revoked_by")
         now_ms = _now_ms()
-        revoked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        revoked_at = datetime.now(UTC).isoformat(timespec="seconds")
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
@@ -657,7 +698,10 @@ class UploaderRepository:
                 (user_id,),
             )
             previous = await cursor.fetchone()
-            if previous is not None and attempt_at - int(previous["last_attempt_at_ms"]) < cooldown_ms:
+            if (
+                previous is not None
+                and attempt_at - int(previous["last_attempt_at_ms"]) < cooldown_ms
+            ):
                 await connection.execute(
                     """INSERT INTO audit_log
                        (actor_id, action, target_type, target_id, created_at_ms)
@@ -677,7 +721,7 @@ class UploaderRepository:
                 supplied_code.encode("utf-8"), configured_code.encode("utf-8")
             )
             if matches:
-                added_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                added_at = datetime.now(UTC).isoformat(timespec="seconds")
                 await connection.execute(
                     """INSERT INTO uploaders (user_id, added_by, added_at)
                        VALUES (?, ?, ?)
@@ -738,10 +782,20 @@ class RequiredChatRepository:
                      is_enabled = excluded.is_enabled,
                      updated_at_ms = MAX(required_chats.updated_at_ms, excluded.updated_at_ms),
                      invite_url = excluded.invite_url""",
-                (chat.chat_id, chat.chat_type, chat.title, chat.username, int(chat.is_enabled), created, updated, chat.invite_url),
+                (
+                    chat.chat_id,
+                    chat.chat_type,
+                    chat.title,
+                    chat.username,
+                    int(chat.is_enabled),
+                    created,
+                    updated,
+                    chat.invite_url,
+                ),
             )
             cursor = await connection.execute(
-                "SELECT created_at_ms, updated_at_ms FROM required_chats WHERE chat_id = ?", (chat.chat_id,)
+                "SELECT created_at_ms, updated_at_ms FROM required_chats WHERE chat_id = ?",
+                (chat.chat_id,),
             )
             row = await cursor.fetchone()
             persisted_created = int(row["created_at_ms"])
@@ -799,9 +853,18 @@ class OfferRepository:
                        (item_id, slug_hash, slug_plain, slug_hint, title, description, is_enabled,
                         created_by_user_id, created_at_ms, updated_at_ms)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (offer.item_id, offer.slug_hash, offer.slug_plain, offer.slug_hint, offer.title,
-                     offer.description, int(offer.is_enabled), offer.created_by_user_id,
-                     offer.created_at_ms, offer.updated_at_ms),
+                    (
+                        offer.item_id,
+                        offer.slug_hash,
+                        offer.slug_plain,
+                        offer.slug_hint,
+                        offer.title,
+                        offer.description,
+                        int(offer.is_enabled),
+                        offer.created_by_user_id,
+                        offer.created_at_ms,
+                        offer.updated_at_ms,
+                    ),
                 )
                 offer_id = int(cursor.lastrowid)
         except sqlite3.IntegrityError as exc:
@@ -822,10 +885,12 @@ class OfferRepository:
         """Return whether a panel-generated offer owns this token hash."""
         _validate_offer_hash(slug_hash)
         async with self.database.connection() as connection:
-            row = await (await connection.execute(
-                "SELECT 1 FROM offers WHERE slug_hash = ? AND slug_plain IS NOT NULL LIMIT 1",
-                (slug_hash,),
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT 1 FROM offers WHERE slug_hash = ? AND slug_plain IS NOT NULL LIMIT 1",
+                    (slug_hash,),
+                )
+            ).fetchone()
         return row is not None
 
     async def get_by_id(self, offer_id: int, *, active_only: bool = False) -> Offer | None:
@@ -888,18 +953,32 @@ class OfferRequirementRepository:
         _require_order(sort_order)
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            if await (await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))).fetchone() is None:
+            if (
+                await (
+                    await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))
+                ).fetchone()
+                is None
+            ):
                 await connection.rollback()
                 raise InvalidRecord("Offer not found")
-            if await (await connection.execute("SELECT 1 FROM required_chats WHERE chat_id = ?", (chat_id,))).fetchone() is None:
+            if (
+                await (
+                    await connection.execute(
+                        "SELECT 1 FROM required_chats WHERE chat_id = ?", (chat_id,)
+                    )
+                ).fetchone()
+                is None
+            ):
                 await connection.rollback()
                 raise InvalidRecord("Channel is not registered; add it via the wizard first")
-            existing = await (await connection.execute(
-                """SELECT 1 FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
+            existing = await (
+                await connection.execute(
+                    """SELECT 1 FROM rule_assignments ra JOIN requirements r ON r.id = ra.requirement_id
                    WHERE ra.scope_type = 'OFFER' AND ra.offer_id = ?
                      AND r.type = 'JOIN_CHAT' AND r.target_chat_id = ? LIMIT 1""",
-                (offer_id, chat_id),
-            )).fetchone()
+                    (offer_id, chat_id),
+                )
+            ).fetchone()
             if existing is not None:
                 await connection.rollback()
                 return False
@@ -911,7 +990,8 @@ class OfferRequirementRepository:
             requirement_id = int(cursor.lastrowid)
             cursor = await connection.execute(
                 """INSERT INTO rule_assignments (requirement_id, scope_type, offer_id, sort_order)
-                   VALUES (?, 'OFFER', ?, ?)""", (requirement_id, offer_id, sort_order)
+                   VALUES (?, 'OFFER', ?, ?)""",
+                (requirement_id, offer_id, sort_order),
             )
             await connection.commit()
         return cursor.rowcount == 1
@@ -936,11 +1016,14 @@ class OfferRequirementRepository:
             await connection.commit()
         return cursor.rowcount == 1
 
-    async def list_required_chats(self, offer_id: int, *, enabled_only: bool = True) -> tuple[OfferRequiredChat, ...]:
+    async def list_required_chats(
+        self, offer_id: int, *, enabled_only: bool = True
+    ) -> tuple[OfferRequiredChat, ...]:
         _require_positive_int(offer_id, "offer_id")
         async with self.database.connection() as connection:
-            rows = await (await connection.execute(
-                """WITH RECURSIVE inherited(category_id) AS (
+            rows = await (
+                await connection.execute(
+                    """WITH RECURSIVE inherited(category_id) AS (
                        SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
                        WHERE o.id = ? AND i.category_id IS NOT NULL
                        UNION
@@ -955,21 +1038,38 @@ class OfferRequirementRepository:
                          OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
                          OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
                    ) ORDER BY CASE ra.scope_type WHEN 'GLOBAL' THEN 0 WHEN 'CATEGORY' THEN 1 ELSE 2 END, ra.sort_order, r.target_chat_id""",
-                (offer_id, offer_id, offer_id))).fetchall()
+                    (offer_id, offer_id, offer_id),
+                )
+            ).fetchall()
         return tuple(_offer_required_chat_from_row(row) for row in rows)
 
-    async def add_requirement(self, offer_id: int, requirement_id: int, *, sort_order: int = 0) -> bool:
+    async def add_requirement(
+        self, offer_id: int, requirement_id: int, *, sort_order: int = 0
+    ) -> bool:
         _require_positive_int(offer_id, "offer_id")
         _require_positive_int(requirement_id, "requirement_id")
         _require_order(sort_order)
         async with self.database.connection() as connection:
-            if await (await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))).fetchone() is None:
+            if (
+                await (
+                    await connection.execute("SELECT 1 FROM offers WHERE id = ?", (offer_id,))
+                ).fetchone()
+                is None
+            ):
                 raise InvalidRecord("Offer not found")
-            if await (await connection.execute("SELECT 1 FROM requirements WHERE id = ?", (requirement_id,))).fetchone() is None:
+            if (
+                await (
+                    await connection.execute(
+                        "SELECT 1 FROM requirements WHERE id = ?", (requirement_id,)
+                    )
+                ).fetchone()
+                is None
+            ):
                 raise InvalidRecord("Requirement not found")
             cursor = await connection.execute(
                 """INSERT INTO rule_assignments (offer_id, requirement_id, scope_type, sort_order)
-                   VALUES (?, ?, 'OFFER', ?)""", (offer_id, requirement_id, sort_order)
+                   VALUES (?, ?, 'OFFER', ?)""",
+                (offer_id, requirement_id, sort_order),
             )
         return cursor.rowcount == 1
 
@@ -986,8 +1086,9 @@ class OfferRequirementRepository:
     async def list_requirements(self, offer_id: int) -> tuple[OfferRequirement, ...]:
         _require_positive_int(offer_id, "offer_id")
         async with self.database.connection() as connection:
-            rows = await (await connection.execute(
-                """WITH RECURSIVE inherited(category_id) AS (
+            rows = await (
+                await connection.execute(
+                    """WITH RECURSIVE inherited(category_id) AS (
                        SELECT i.category_id FROM offers o JOIN items i ON i.id = o.item_id
                        WHERE o.id = ? AND i.category_id IS NOT NULL
                        UNION
@@ -1001,12 +1102,15 @@ class OfferRequirementRepository:
                          OR (ra.scope_type = 'CATEGORY' AND ra.category_id IN (SELECT category_id FROM inherited))
                          OR (ra.scope_type = 'OFFER' AND ra.offer_id = ?)
                    ) ORDER BY CASE ra.scope_type WHEN 'GLOBAL' THEN 0 WHEN 'CATEGORY' THEN 1 ELSE 2 END, ra.sort_order, ra.requirement_id""",
-                (offer_id, offer_id, offer_id))).fetchall()
+                    (offer_id, offer_id, offer_id),
+                )
+            ).fetchall()
         return tuple(_offer_requirement_from_row(row) for row in rows)
 
     async def get_requirement(self, requirement_id: int):
         """Resolve an assigned requirement through the canonical rule repository."""
         from media_bot.db.rules import RequirementRepository
+
         return await RequirementRepository(self.database).get(requirement_id)
 
 
@@ -1016,7 +1120,9 @@ class OfferDeliveryRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    async def record_unlock(self, offer_id: int, user_id: int, *, at_ms: int) -> tuple[OfferDelivery, bool]:
+    async def record_unlock(
+        self, offer_id: int, user_id: int, *, at_ms: int
+    ) -> tuple[OfferDelivery, bool]:
         _require_positive_int(offer_id, "offer_id")
         _require_positive_int(user_id, "user_id")
         _require_time(at_ms, "at_ms")
@@ -1033,12 +1139,15 @@ class OfferDeliveryRepository:
                 await connection.execute(
                     """INSERT OR IGNORE INTO offer_events
                        (offer_id, user_id, event_type, created_at_ms)
-                       VALUES (?, ?, 'unlock', ?)""", (offer_id, user_id, at_ms)
+                       VALUES (?, ?, 'unlock', ?)""",
+                    (offer_id, user_id, at_ms),
                 )
-            row = await (await connection.execute(
-                "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
-                (offer_id, user_id),
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
+                    (offer_id, user_id),
+                )
+            ).fetchone()
             await connection.commit()
         return _offer_delivery_from_row(row), inserted
 
@@ -1050,19 +1159,23 @@ class OfferDeliveryRepository:
             await connection.execute("BEGIN IMMEDIATE")
             cursor = await connection.execute(
                 """UPDATE offer_deliveries SET last_delivered_at_ms = ?, delivery_count = delivery_count + 1
-                   WHERE offer_id = ? AND user_id = ?""", (at_ms, offer_id, user_id)
+                   WHERE offer_id = ? AND user_id = ?""",
+                (at_ms, offer_id, user_id),
             )
             if cursor.rowcount != 1:
                 await connection.rollback()
                 raise RecordNotFound("Offer unlock does not exist for this user")
             await connection.execute(
                 """INSERT INTO offer_events (offer_id, user_id, event_type, created_at_ms)
-                   VALUES (?, ?, 'delivery', ?)""", (offer_id, user_id, at_ms)
+                   VALUES (?, ?, 'delivery', ?)""",
+                (offer_id, user_id, at_ms),
             )
-            row = await (await connection.execute(
-                "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
-                (offer_id, user_id),
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    "SELECT * FROM offer_deliveries WHERE offer_id = ? AND user_id = ?",
+                    (offer_id, user_id),
+                )
+            ).fetchone()
             await connection.commit()
         return _offer_delivery_from_row(row)
 
@@ -1098,21 +1211,35 @@ class OfferEventRepository:
                     """INSERT OR IGNORE INTO offer_events
                        (offer_id, user_id, event_type, verification_result, created_at_ms, metadata_json)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (offer_id, user_id, event_type, verification_result, at_ms, metadata_json),
+                    (
+                        offer_id,
+                        user_id,
+                        event_type,
+                        verification_result,
+                        at_ms,
+                        metadata_json,
+                    ),
                 )
             else:
                 cursor = await connection.execute(
                     """INSERT INTO offer_events
                        (offer_id, user_id, event_type, verification_result, created_at_ms, metadata_json)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (offer_id, user_id, event_type, verification_result, at_ms, metadata_json),
+                    (
+                        offer_id,
+                        user_id,
+                        event_type,
+                        verification_result,
+                        at_ms,
+                        metadata_json,
+                    ),
                 )
             if cursor.rowcount != 1:
                 return None
             event_id = int(cursor.lastrowid)
-            row = await (await connection.execute(
-                "SELECT * FROM offer_events WHERE id = ?", (event_id,)
-            )).fetchone()
+            row = await (
+                await connection.execute("SELECT * FROM offer_events WHERE id = ?", (event_id,))
+            ).fetchone()
         return _offer_event_from_row(row)
 
     async def stats(self, offer_id: int | None = None) -> tuple[OfferStats, ...]:
@@ -1148,12 +1275,19 @@ class OfferEventRepository:
             starts = int(row["starts"])
             distinct_starts = int(row["distinct_start_users"])
             distinct_unlocks = int(row["distinct_unlock_users"])
-            result.append(OfferStats(
-                offer_id=int(row["offer_id"]), starts=starts,
-                distinct_start_users=distinct_starts, unlocks=int(row["unlocks"]),
-                distinct_unlock_users=distinct_unlocks, deliveries=int(row["deliveries"]),
-                conversion_rate_percent=(distinct_unlocks / distinct_starts * 100.0) if distinct_starts else 0.0,
-            ))
+            result.append(
+                OfferStats(
+                    offer_id=int(row["offer_id"]),
+                    starts=starts,
+                    distinct_start_users=distinct_starts,
+                    unlocks=int(row["unlocks"]),
+                    distinct_unlock_users=distinct_unlocks,
+                    deliveries=int(row["deliveries"]),
+                    conversion_rate_percent=(distinct_unlocks / distinct_starts * 100.0)
+                    if distinct_starts
+                    else 0.0,
+                )
+            )
         return tuple(result)
 
 
@@ -1194,7 +1328,11 @@ class PendingUploadRepository:
         _validate_text(message.file_id, "file_id", max_length=2048)
         _validate_text(message.file_unique_id, "file_unique_id", max_length=256)
         _validate_file_size(message.file_size_bytes)
-        if isinstance(message.sequence, bool) or not isinstance(message.sequence, int) or message.sequence < 0:
+        if (
+            isinstance(message.sequence, bool)
+            or not isinstance(message.sequence, int)
+            or message.sequence < 0
+        ):
             raise InvalidRecord("sequence must be a non-negative integer")
 
         try:
@@ -1211,7 +1349,14 @@ class PendingUploadRepository:
                            (upload_id, owner_user_id, media_group_id, status, created_at_ms,
                             last_seen_at_ms, settle_at_ms, pipeline)
                            VALUES (?, ?, ?, 'collecting', ?, ?, ?, 'm2')""",
-                        (upload_id, owner_user_id, media_group_id, message.received_at_ms, message.received_at_ms, settle_at_ms),
+                        (
+                            upload_id,
+                            owner_user_id,
+                            media_group_id,
+                            message.received_at_ms,
+                            message.received_at_ms,
+                            settle_at_ms,
+                        ),
                     )
                 else:
                     upload_id = str(upload["upload_id"])
@@ -1240,7 +1385,9 @@ class PendingUploadRepository:
                         and str(existing["file_unique_id"]) == message.file_unique_id
                     )
                     if not same_upload or not same_message:
-                        raise InvalidRecord("Telegram source message conflicts with an existing pending upload")
+                        raise InvalidRecord(
+                            "Telegram source message conflicts with an existing pending upload"
+                        )
                     await connection.commit()
                     return False
 
@@ -1267,19 +1414,25 @@ class PendingUploadRepository:
                 await connection.commit()
                 return True
         except sqlite3.IntegrityError as exc:
-            raise InvalidRecord("Pending-upload data violates uniqueness or database constraints") from exc
+            raise InvalidRecord(
+                "Pending-upload data violates uniqueness or database constraints"
+            ) from exc
 
     async def get(self, upload_id: str) -> PendingUpload | None:
         _validate_text(upload_id, "upload_id", max_length=128)
         async with self.database.connection() as connection:
-            cursor = await connection.execute("SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,))
+            cursor = await connection.execute(
+                "SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,)
+            )
             row = await cursor.fetchone()
             if row is None:
                 return None
             messages = await _pending_messages(connection, upload_id)
         return _pending_upload_from_row(row, messages)
 
-    async def get_by_owner_and_group(self, owner_user_id: int, media_group_id: str) -> PendingUpload | None:
+    async def get_by_owner_and_group(
+        self, owner_user_id: int, media_group_id: str
+    ) -> PendingUpload | None:
         _require_positive_int(owner_user_id, "owner_user_id")
         _validate_text(media_group_id, "media_group_id", max_length=128)
         async with self.database.connection() as connection:
@@ -1291,14 +1444,14 @@ class PendingUploadRepository:
             if row is None:
                 return None
             upload_id = str(row["upload_id"])
-            cursor = await connection.execute("SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,))
+            cursor = await connection.execute(
+                "SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,)
+            )
             upload = await cursor.fetchone()
             messages = await _pending_messages(connection, upload_id)
         return _pending_upload_from_row(upload, messages)
 
-    async def list_recoverable(
-        self, *, pipeline: str | None = None
-    ) -> tuple[PendingUpload, ...]:
+    async def list_recoverable(self, *, pipeline: str | None = None) -> tuple[PendingUpload, ...]:
         if pipeline not in {None, "legacy", "m2"}:
             raise InvalidRecord("pipeline must be legacy, m2, or None")
         async with self.database.connection() as connection:
@@ -1359,9 +1512,7 @@ class PendingUploadRepository:
             await connection.commit()
         return True
 
-    async def mark_category_selection_pending(
-        self, upload_id: str, *, owner_user_id: int
-    ) -> bool:
+    async def mark_category_selection_pending(self, upload_id: str, *, owner_user_id: int) -> bool:
         """Persist a no-category choice state before showing an inline keyboard."""
         _validate_text(upload_id, "upload_id", max_length=128)
         _require_positive_int(owner_user_id, "owner_user_id")
@@ -1390,7 +1541,9 @@ class PendingUploadRepository:
             _validate_text(error_code, "error_code", max_length=128)
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute("SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,))
+            cursor = await connection.execute(
+                "SELECT * FROM pending_uploads WHERE upload_id = ?", (upload_id,)
+            )
             row = await cursor.fetchone()
             if row is None:
                 await connection.rollback()
@@ -1398,7 +1551,9 @@ class PendingUploadRepository:
             old_status = str(row["status"])
             if new_status not in self._TRANSITIONS[old_status]:
                 await connection.rollback()
-                raise InvalidTransition(f"Cannot change pending upload from {old_status} to {new_status}")
+                raise InvalidTransition(
+                    f"Cannot change pending upload from {old_status} to {new_status}"
+                )
             if at_ms < int(row["created_at_ms"]):
                 await connection.rollback()
                 raise InvalidRecord("transition timestamp cannot precede upload creation")
@@ -1412,7 +1567,13 @@ class PendingUploadRepository:
             await connection.execute(
                 """UPDATE pending_uploads SET status = ?, started_at_ms = ?, finished_at_ms = ?, error_code = ?
                    WHERE upload_id = ?""",
-                (new_status, started, finished, error_code if new_status == "failed" else None, upload_id),
+                (
+                    new_status,
+                    started,
+                    finished,
+                    error_code if new_status == "failed" else None,
+                    upload_id,
+                ),
             )
             await connection.commit()
         result = await self.get(upload_id)
@@ -1467,39 +1628,65 @@ def _validate_slug_plain(value: str) -> None:
 
 def _offer_from_row(row: sqlite3.Row) -> Offer:
     return Offer(
-        id=int(row["id"]), item_id=int(row["item_id"]), slug_hash=bytes(row["slug_hash"]),
-        slug_hint=row["slug_hint"], title=str(row["title"]), description=row["description"],
-        is_enabled=bool(row["is_enabled"]), created_by_user_id=int(row["created_by_user_id"]),
-        created_at_ms=int(row["created_at_ms"]), updated_at_ms=int(row["updated_at_ms"]),
+        id=int(row["id"]),
+        item_id=int(row["item_id"]),
+        slug_hash=bytes(row["slug_hash"]),
+        slug_hint=row["slug_hint"],
+        title=str(row["title"]),
+        description=row["description"],
+        is_enabled=bool(row["is_enabled"]),
+        created_by_user_id=int(row["created_by_user_id"]),
+        created_at_ms=int(row["created_at_ms"]),
+        updated_at_ms=int(row["updated_at_ms"]),
         slug_plain=row["slug_plain"] if "slug_plain" in row.keys() else None,
-        share_link_id=(int(row["share_link_id"]) if "share_link_id" in row.keys() and row["share_link_id"] is not None else None),
+        share_link_id=(
+            int(row["share_link_id"])
+            if "share_link_id" in row.keys() and row["share_link_id"] is not None
+            else None
+        ),
     )
 
 
 def _offer_required_chat_from_row(row: sqlite3.Row) -> OfferRequiredChat:
-    return OfferRequiredChat(int(row["offer_id"]), int(row["chat_id"]), int(row["sort_order"]), bool(row["is_enabled"]))
+    return OfferRequiredChat(
+        int(row["offer_id"]),
+        int(row["chat_id"]),
+        int(row["sort_order"]),
+        bool(row["is_enabled"]),
+    )
 
 
 def _offer_requirement_from_row(row: sqlite3.Row) -> OfferRequirement:
-    return OfferRequirement(int(row["offer_id"]), int(row["requirement_id"]), int(row["sort_order"]))
+    return OfferRequirement(
+        int(row["offer_id"]), int(row["requirement_id"]), int(row["sort_order"])
+    )
 
 
 def _offer_delivery_from_row(row: sqlite3.Row) -> OfferDelivery:
     return OfferDelivery(
-        int(row["offer_id"]), int(row["user_id"]), int(row["first_unlocked_at_ms"]),
-        int(row["last_delivered_at_ms"]), int(row["delivery_count"]),
+        int(row["offer_id"]),
+        int(row["user_id"]),
+        int(row["first_unlocked_at_ms"]),
+        int(row["last_delivered_at_ms"]),
+        int(row["delivery_count"]),
     )
 
 
 def _offer_event_from_row(row: sqlite3.Row) -> OfferEvent:
     return OfferEvent(
-        id=int(row["id"]), offer_id=int(row["offer_id"]), user_id=int(row["user_id"]),
-        event_type=str(row["event_type"]), verification_result=row["verification_result"],
-        created_at_ms=int(row["created_at_ms"]), metadata_json=str(row["metadata_json"]),
+        id=int(row["id"]),
+        offer_id=int(row["offer_id"]),
+        user_id=int(row["user_id"]),
+        event_type=str(row["event_type"]),
+        verification_result=row["verification_result"],
+        created_at_ms=int(row["created_at_ms"]),
+        metadata_json=str(row["metadata_json"]),
     )
 
 
-async def _pending_messages(connection: aiosqlite.Connection, upload_id: str) -> tuple[PendingUploadMessage, ...]:
+async def _pending_messages(
+    connection: aiosqlite.Connection, upload_id: str
+) -> tuple[PendingUploadMessage, ...]:
     cursor = await connection.execute(
         """SELECT * FROM pending_upload_messages WHERE upload_id = ? ORDER BY sequence""",
         (upload_id,),
@@ -1523,7 +1710,9 @@ async def _pending_messages(connection: aiosqlite.Connection, upload_id: str) ->
     )
 
 
-def _pending_upload_from_row(row: sqlite3.Row, messages: tuple[PendingUploadMessage, ...]) -> PendingUpload:
+def _pending_upload_from_row(
+    row: sqlite3.Row, messages: tuple[PendingUploadMessage, ...]
+) -> PendingUpload:
     return PendingUpload(
         upload_id=str(row["upload_id"]),
         owner_user_id=int(row["owner_user_id"]),

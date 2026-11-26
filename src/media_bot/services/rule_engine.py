@@ -1,4 +1,5 @@
 """Dynamic category requirement evaluation for share-link delivery."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,14 +8,13 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from media_bot.db.repositories import InvalidRecord
 from media_bot.db.rules import (
     BotSettingsRepository,
     CategoryRepository,
-    ReactionRepository,
     Requirement,
+    validate_telegram_link,
 )
-from media_bot.db.repositories import InvalidRecord
-from media_bot.db.rules import validate_telegram_link
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ class RequirementEvaluator:
     def __init__(self, database) -> None:
         self.database = database
         self.categories = CategoryRepository(database)
-        self.reactions = ReactionRepository(database)
         self.settings = BotSettingsRepository(database)
 
     async def verify(self, *, category_id: int, user_id: int, bot: Any, message: Any) -> bool:
@@ -35,7 +34,9 @@ class RequirementEvaluator:
                 return False
         return True
 
-    async def _verify_one(self, requirement: Requirement, *, user_id: int, bot: Any, message: Any) -> bool:
+    async def _verify_one(
+        self, requirement: Requirement, *, user_id: int, bot: Any, message: Any
+    ) -> bool:
         settings = requirement.settings
         wait_seconds = int(settings.get("wait_seconds", 0))
         if requirement.type == "TIMED_WAIT":
@@ -45,14 +46,9 @@ class RequirementEvaluator:
             await _prompt_then_wait(message, requirement, wait_seconds)
             return True
 
-        if requirement.type == "START_BOT":
-            # The repository rejects real START_BOT rules; this guard protects
-            # against manually inserted or pre-release database rows as well.
-            logger.error("unsupported_real_start_bot_requirement")
-            await message.reply_text(
-                "This access requirement cannot currently be verified. Please contact the administrator."
-            )
-            return False
+        if requirement.type == "REACT":
+            await _prompt_then_wait(message, requirement, wait_seconds)
+            return True
 
         if requirement.type == "JOIN_CHAT":
             try:
@@ -61,11 +57,11 @@ class RequirementEvaluator:
                 )
             except Exception as exc:
                 logger.warning("join_chat_check_failed (%s)", type(exc).__name__)
-                return await self._handle_real_check_unavailable(
-                    requirement, wait_seconds, message,
+                await message.reply_text(
                     "Membership could not be verified. Please try again later.",
-                    "Open required channel or group",
+                    reply_markup=_link_markup(requirement, "Retry membership verification"),
                 )
+                return False
             status = str(getattr(membership, "status", "")).lower()
             is_member = status in {"creator", "administrator", "member"}
             if status == "restricted":
@@ -86,74 +82,8 @@ class RequirementEvaluator:
             )
             return False
 
-        if requirement.type == "REACT":
-            last_x_messages = int(settings.get("last_x_messages", 5))
-            channel_id = _requirement_chat_id(requirement)
-            try:
-                bot_id = getattr(bot, "id", None)
-                if not isinstance(bot_id, int) or bot_id <= 0:
-                    identity = await bot.get_me()
-                    bot_id = int(identity.id)
-                membership = await bot.get_chat_member(chat_id=channel_id, user_id=bot_id)
-                bot_is_admin = str(getattr(membership, "status", "")).lower() in {
-                    "administrator", "creator"
-                }
-            except Exception as exc:
-                logger.warning("reaction_check_unavailable (%s)", type(exc).__name__)
-                return await self._handle_real_check_unavailable(
-                    requirement, wait_seconds, message,
-                    "The channel reaction check is unavailable. Please try again later.",
-                    "Open required channel",
-                )
-            if not bot_is_admin:
-                return await self._handle_real_check_unavailable(
-                    requirement, wait_seconds, message,
-                    "The channel reaction check is unavailable. Please try again later.",
-                    "Open required channel",
-                )
-            try:
-                has_reaction = await self.reactions.has_recent_reaction(
-                    user_id=user_id,
-                    channel_id=channel_id,
-                    last_x_messages=last_x_messages,
-                    last_x_days=int(settings.get("last_x_days", 0)),
-                )
-            except Exception as exc:
-                logger.warning("reaction_state_check_failed (%s)", type(exc).__name__)
-                return await self._handle_real_check_unavailable(
-                    requirement, wait_seconds, message,
-                    "The channel reaction check is unavailable. Please try again later.",
-                    "Open required channel",
-                )
-            if has_reaction:
-                return True
-            await message.reply_text(
-                "React to at least one recent post in the required channel to access this file.",
-                reply_markup=_link_markup(requirement, "Open required channel"),
-            )
-            return False
-
         logger.error("unknown_requirement_type")
         await message.reply_text("An access requirement could not be evaluated.")
-        return False
-
-    async def _handle_real_check_unavailable(
-        self,
-        requirement: Requirement,
-        wait_seconds: int,
-        message: Any,
-        denial_text: str,
-        link_label: str,
-    ) -> bool:
-        try:
-            policy = await self.settings.real_check_failure_policy()
-        except Exception as exc:
-            logger.error("real_check_failure_policy_read_failed (%s)", type(exc).__name__)
-            policy = BotSettingsRepository.REAL_CHECK_FAIL_CLOSED
-        if policy == BotSettingsRepository.REAL_CHECK_WAIT_FALLBACK:
-            await _wait_with_message(message, wait_seconds)
-            return True
-        await message.reply_text(denial_text, reply_markup=_link_markup(requirement, link_label))
         return False
 
 
@@ -163,9 +93,7 @@ async def _wait_with_message(message: Any, wait_seconds: int) -> None:
         await asyncio.sleep(wait_seconds)
 
 
-async def _prompt_then_wait(
-    message: Any, requirement: Requirement, wait_seconds: int
-) -> None:
+async def _prompt_then_wait(message: Any, requirement: Requirement, wait_seconds: int) -> None:
     prompts = {
         "JOIN_CHAT": "Please join the required channel or group to continue.",
         "REACT": "Please react to a post in the required channel to continue.",
@@ -198,9 +126,7 @@ def _requirement_chat_id(requirement: Requirement) -> int:
     return int(value)
 
 
-def _link_markup(
-    requirement: Requirement, label: str
-) -> InlineKeyboardMarkup | None:
+def _link_markup(requirement: Requirement, label: str) -> InlineKeyboardMarkup | None:
     try:
         link_url = validate_telegram_link(requirement.settings.get("link_url"))
     except InvalidRecord:

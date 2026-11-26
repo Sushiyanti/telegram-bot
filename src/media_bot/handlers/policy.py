@@ -1,7 +1,9 @@
 """Database-backed non-admin command and upload lockdown."""
+
 from __future__ import annotations
 
 import logging
+
 from telegram import Update
 from telegram.ext import ApplicationHandlerStop, ContextTypes
 
@@ -14,7 +16,13 @@ from media_bot.db.rules import BotSettingsRepository
 logger = logging.getLogger(__name__)
 _ALLOWED_COMMANDS = {"start"}
 _MEDIA_FIELDS = (
-    "document", "photo", "video", "audio", "voice", "animation", "video_note"
+    "document",
+    "photo",
+    "video",
+    "audio",
+    "voice",
+    "animation",
+    "video_note",
 )
 
 
@@ -34,27 +42,30 @@ async def toggle_commands_command(update: Update, context: ContextTypes.DEFAULT_
     action = "user_commands_enabled" if enabled else "user_commands_disabled"
     try:
         await AuditLogRepository(_database(context)).record_event(
-            actor_id=int(user.id), action=action, target_type="bot_setting",
+            actor_id=int(user.id),
+            action=action,
+            target_type="bot_setting",
             target_id=BotSettingsRepository.COMMANDS_KEY,
         )
     except Exception as exc:
         logger.error("command_toggle_audit_failed (%s)", type(exc).__name__)
     await message.reply_text(
         "Regular-user commands and uploads are enabled."
-        if enabled else "Regular-user commands and uploads are locked."
+        if enabled
+        else "Regular-user commands and uploads are locked."
     )
 
 
-async def enforce_user_command_policy(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def enforce_user_command_policy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Stop disallowed commands/uploads only for users outside the effective allowlist."""
     user = update.effective_user
     message = update.effective_message
     if user is None or message is None:
         return
     callback_query = getattr(update, "callback_query", None)
-    if callback_query is not None and str(getattr(callback_query, "data", "")).startswith("verify:"):
+    if callback_query is not None and str(getattr(callback_query, "data", "")).startswith(
+        "verify:"
+    ):
         return
     bot_data = context.application.bot_data
     database = bot_data["database"]

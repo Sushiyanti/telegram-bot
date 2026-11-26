@@ -10,7 +10,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from media_bot.auth import can_upload_with_registry, is_admin
+from media_bot.auth import is_admin
 from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
@@ -29,9 +29,8 @@ from media_bot.services import ShareLinkService, hash_share_token
 from media_bot.services.offer_delivery import deliver_offer
 from media_bot.services.offer_evaluator import OfferEvaluator
 from media_bot.services.offer_messaging import render_gate_message
-from media_bot.services.verify_callback import VerifyCallbackPayload
 from media_bot.services.rule_engine import RequirementEvaluator
-
+from media_bot.services.verify_callback import VerifyCallbackPayload
 
 logger = logging.getLogger(__name__)
 _ITEM_ID = re.compile(r"^[0-9]+$")
@@ -72,7 +71,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("Welcome. Open a valid share link to receive a file.")
         return
     token = context.args[0]
-    if not isinstance(token, str) or len(token) > 64 or any(character.isspace() for character in token):
+    if (
+        not isinstance(token, str)
+        or len(token) > 64
+        or any(character.isspace() for character in token)
+    ):
         await message.reply_text("This offer or share link is unavailable.")
         return
     if not _private_chat(update):
@@ -124,7 +127,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     expected_storage_id = item.storage_channel_id
     if expected_storage_id is None:
-        category = await CategoryRepository(database).get(item.category_id) if item.category_id else None
+        category = (
+            await CategoryRepository(database).get(item.category_id) if item.category_id else None
+        )
         expected_storage_id = (
             category.storage_channel_id
             if category is not None and category.storage_channel_id is not None
@@ -180,10 +185,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await message.reply_text("Delivered.")
-    await _audit(database, actor_id=int(user.id), action="share_delivery", target_id=str(consumed.id))
+    await _audit(
+        database,
+        actor_id=int(user.id),
+        action="share_delivery",
+        target_id=str(consumed.id),
+    )
 
 
-async def _start_offer(update: Update, context: ContextTypes.DEFAULT_TYPE, offer: Any, items: ItemRepository) -> None:
+async def _start_offer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    offer: Any,
+    items: ItemRepository,
+) -> None:
     message = update.effective_message
     user = update.effective_user
     settings = _settings(context)
@@ -194,17 +209,28 @@ async def _start_offer(update: Update, context: ContextTypes.DEFAULT_TYPE, offer
         return
     expected_storage_id = item.storage_channel_id
     if expected_storage_id is None:
-        category = await CategoryRepository(database).get(item.category_id) if item.category_id else None
-        expected_storage_id = category.storage_channel_id if category and category.storage_channel_id is not None else settings.storage_channel_id
+        category = (
+            await CategoryRepository(database).get(item.category_id) if item.category_id else None
+        )
+        expected_storage_id = (
+            category.storage_channel_id
+            if category and category.storage_channel_id is not None
+            else settings.storage_channel_id
+        )
     if any(reference.chat_id != expected_storage_id for reference in item.storage_messages):
         await message.reply_text("This shared item is unavailable.")
         return
-    if not TransferCapabilities(settings.verified_transfer_max_file_bytes).supports(item.file_size_bytes):
+    if not TransferCapabilities(settings.verified_transfer_max_file_bytes).supports(
+        item.file_size_bytes
+    ):
         await message.reply_text("Delivery is not verified for this file size.")
         return
     try:
         await OfferEventRepository(database).append(
-            offer.id, int(user.id), "start", at_ms=__import__("time").time_ns() // 1_000_000
+            offer.id,
+            int(user.id),
+            "start",
+            at_ms=__import__("time").time_ns() // 1_000_000,
         )
     except Exception as exc:
         logger.warning("offer_start_event_failed (%s)", type(exc).__name__)
@@ -213,7 +239,7 @@ async def _start_offer(update: Update, context: ContextTypes.DEFAULT_TYPE, offer
             bot=context.bot,
             offer_repo=OfferRepository(database),
             requirement_repo=OfferRequirementRepository(database),
-            reaction_repo=__import__("media_bot.db.rules", fromlist=["ReactionRepository"]).ReactionRepository(database),
+            reaction_repo=None,
             chat_repo=RequiredChatRepository(database),
         ).evaluate(offer.id, int(user.id))
     except Exception as exc:
@@ -226,10 +252,14 @@ async def _start_offer(update: Update, context: ContextTypes.DEFAULT_TYPE, offer
         await message.reply_text(text, reply_markup=markup)
         return
     outcome = await deliver_offer(context, offer, int(user.id))
-    await message.reply_text("Delivered." if outcome.ok else "Delivery failed. Please try again later.")
+    await message.reply_text(
+        "Delivered." if outcome.ok else "Delivery failed. Please try again later."
+    )
 
 
-def _remember_verify_nonce(context: ContextTypes.DEFAULT_TYPE, offer_id: int, user_id: int, markup: Any) -> None:
+def _remember_verify_nonce(
+    context: ContextTypes.DEFAULT_TYPE, offer_id: int, user_id: int, markup: Any
+) -> None:
     for row in getattr(markup, "inline_keyboard", ()):
         for button in row:
             payload = VerifyCallbackPayload.decode(getattr(button, "callback_data", ""))
@@ -340,7 +370,9 @@ async def adduser_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         user_id=target_id,
         added_by=int(user.id),
     )
-    await message.reply_text("Uploader access granted." if changed else "User is already an uploader.")
+    await message.reply_text(
+        "Uploader access granted." if changed else "User is already an uploader."
+    )
 
 
 async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -363,7 +395,9 @@ async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_id=target_id,
         revoked_by=int(user.id),
     )
-    await message.reply_text("Uploader access revoked." if changed else "No active uploader grant found.")
+    await message.reply_text(
+        "Uploader access revoked." if changed else "No active uploader grant found."
+    )
 
 
 async def _audit(database: Database, *, actor_id: int, action: str, target_id: str) -> None:

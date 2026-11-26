@@ -18,7 +18,6 @@ from media_bot.startup import (
     run_legacy_required_channel_import,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -33,7 +32,9 @@ def main() -> None:
     configure_logging(settings.log_level)
     logger.info(
         "bot_runtime_instance hostname=%s pid=%s db_path=%s",
-        socket.gethostname(), os.getpid(), settings.db_path,
+        socket.gethostname(),
+        os.getpid(),
+        settings.db_path,
     )
     try:
         prepare_state_directory(settings.db_path)
@@ -45,9 +46,7 @@ def main() -> None:
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
-            Database(settings.db_path).initialize(
-                storage_channel_id=settings.storage_channel_id
-            )
+            Database(settings.db_path).initialize(storage_channel_id=settings.storage_channel_id)
         )
         loop.run_until_complete(
             run_legacy_required_channel_import(
@@ -65,7 +64,7 @@ def main() -> None:
     application = build_application(settings)
     logger.info("Starting Telegram bot in long-polling mode")
     application.run_polling(
-        allowed_updates=["message", "callback_query", "channel_post", "message_reaction"],
+        allowed_updates=["message", "callback_query"],
         drop_pending_updates=False,
     )
 

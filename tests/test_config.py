@@ -6,7 +6,6 @@ import pytest
 
 from media_bot.config import ConfigurationError, Settings
 
-
 VALID_ENV = {
     "BOT_TOKEN": "123:dummy",
     "STORAGE_CHANNEL_ID": "-1001234567890",
@@ -93,9 +92,7 @@ def test_configured_uploader_ids_are_preserved_outside_allowlist_mode() -> None:
 
 def test_invalid_configured_uploader_id_is_rejected_outside_allowlist_mode() -> None:
     with pytest.raises(ConfigurationError, match="UPLOADER_IDS"):
-        Settings.from_env(
-            {**VALID_ENV, "UPLOADER_MODE": "admin", "UPLOADER_IDS": "@not_numeric"}
-        )
+        Settings.from_env({**VALID_ENV, "UPLOADER_MODE": "admin", "UPLOADER_IDS": "@not_numeric"})
 
 
 @pytest.mark.parametrize(

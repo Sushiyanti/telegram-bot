@@ -60,9 +60,24 @@ def test_application_builds_without_network_access(settings: Settings) -> None:
         for command in handler.commands
     }
     assert commands == {
-        "start", "whoami", "configcheck", "share", "redeem", "adduser", "revoke",
-        "list", "delete", "addcategory", "linkcategory", "addrequirement",
-        "delcategory", "togglecommands", "admin", "panel", "stats", "fixinvites", "reactiondiag",
+        "start",
+        "whoami",
+        "configcheck",
+        "share",
+        "redeem",
+        "adduser",
+        "revoke",
+        "list",
+        "delete",
+        "addcategory",
+        "linkcategory",
+        "addrequirement",
+        "delcategory",
+        "togglecommands",
+        "admin",
+        "panel",
+        "stats",
+        "fixinvites",
     }
     assert application.bot_data["settings"] is settings
     assert application.bot_data["database"].path == settings.db_path
@@ -85,7 +100,9 @@ def test_all_uploaders_in_production_emits_startup_warning(
     assert "UPLOADER_MODE=all" in caplog.text
 
 
-async def test_post_init_seeds_configured_admins_before_recovery(settings: Settings) -> None:
+async def test_post_init_seeds_configured_admins_before_recovery(
+    settings: Settings,
+) -> None:
     application = build_application(settings)
     database = application.bot_data["database"]
     await database.initialize(storage_channel_id=settings.storage_channel_id)

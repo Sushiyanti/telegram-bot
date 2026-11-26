@@ -1,181 +1,80 @@
-"""Acceptance coverage for live-shaped reaction persistence and evaluation."""
-from pathlib import Path
+from __future__ import annotations
+
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
-from telegram import Update
 
-from media_bot.db.database import Database
 from media_bot.db.models import Offer
-from media_bot.db.rules import ReactionRepository
-from media_bot.handlers.reactions import ReactionUpdateHandler
 from media_bot.services.offer_evaluator import OfferEvaluator
-
 
 USER = 7776557709
 CHANNEL = -1004465118588
-MESSAGE = 987
 
 
 @pytest.fixture
-async def database(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "state" / "bot.sqlite3")
-    await database.initialize()
-    return database
-
-
-def reaction_update(emojis: list[dict[str, str]]) -> Update:
-    return Update.de_json({
-        "update_id": 991,
-        "message_reaction": {
-            "chat": {"id": CHANNEL, "type": "channel", "title": "Target"},
-            "message_id": MESSAGE,
-            "user": {"id": USER, "is_bot": False, "first_name": "Test"},
-            "date": 1_800_000_001,
-            "old_reaction": [],
-            "new_reaction": emojis,
-        },
-    }, bot=None)
-
-
-@pytest.mark.asyncio
-async def test_exact_post_reaction_is_persisted_without_observed_channel_post(database: Database) -> None:
-    handler = ReactionUpdateHandler(database)
-    await handler.handle_update(reaction_update([{"type": "emoji", "emoji": "👍"}]), None)
-    repository = ReactionRepository(database)
-    assert await repository.has_reaction(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍"
-    )
-    async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT user_id, channel_id, message_id, emoji FROM user_reactions"
-        )).fetchone()
-    assert tuple(row) == (USER, CHANNEL, MESSAGE, "👍")
-
-
-@pytest.mark.asyncio
-async def test_reaction_removal_makes_exact_gate_fail_again(database: Database) -> None:
-    repository = ReactionRepository(database)
-    await repository.replace_user_message_reactions(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE,
-        emojis=("👍",), updated_at_ms=1_800_000_001,
-    )
-    assert await repository.has_reaction(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍"
-    )
-    await repository.replace_user_message_reactions(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE,
-        emojis=(), updated_at_ms=1_800_000_002,
-    )
-    assert not await repository.has_reaction(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍"
-    )
-
-
-@pytest.mark.asyncio
-async def test_evaluator_enforces_specific_post(database: Database) -> None:
-    repository = ReactionRepository(database)
-    await repository.replace_user_message_reactions(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE,
-        emojis=("👍",), updated_at_ms=1_800_000_001,
-    )
+def evaluator() -> OfferEvaluator:
     offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
-    evaluator = OfferEvaluator(
-        bot=SimpleNamespace(),
-        offer_repo=SimpleNamespace(get=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value=offer)),
-        requirement_repo=SimpleNamespace(
-            list_required_chats=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value=[]),
-            list_requirements=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value=[SimpleNamespace(
-                requirement_id=3,
-            )]),
-            get_requirement=__import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value=SimpleNamespace(
-                id=3, type="REACT", target=str(CHANNEL), settings={
-                    "react_post": str(MESSAGE), "reaction_emoji": "👍",
-                },
-            )),
-        ),
-        reaction_repo=repository,
-        chat_repo=SimpleNamespace(),
+    requirement = SimpleNamespace(
+        id=3,
+        type="REACT",
+        target="-1000000000000",
+        target_chat_id=CHANNEL,
+        settings={"wait_seconds": 5, "link_url": "https://t.me/target"},
     )
-    result = await evaluator.evaluate(1, USER)
-    assert result.all_passed
-    assert result.gates[0].reason is None
-
-
-@pytest.mark.asyncio
-async def test_any_recent_requires_observed_post_timestamp(database: Database) -> None:
-    repository = ReactionRepository(database)
-    await repository.observe_post(CHANNEL, MESSAGE, 1_800_000_000_000)
-    await repository.replace_user_message_reactions(
-        user_id=USER, channel_id=CHANNEL, message_id=MESSAGE,
-        emojis=("👍",), updated_at_ms=1_800_000_001_000,
-    )
-    assert await repository.has_recent_reaction(
-        user_id=USER, channel_id=CHANNEL, last_x_messages=5,
-        last_x_days=1_000, now_ms=1_800_000_002_000, required_emoji="👍"
-    )
-
-
-@pytest.mark.asyncio
-async def test_campaign_wait_seconds_is_read_from_linked_requirements(database: Database) -> None:
-    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
-    from unittest.mock import AsyncMock
-    evaluator = OfferEvaluator(
+    return OfferEvaluator(
         bot=SimpleNamespace(),
         offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)),
         requirement_repo=SimpleNamespace(
-            list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
-            get_requirement=AsyncMock(return_value=SimpleNamespace(
-                id=3, type="REACT", target=str(CHANNEL),
-                settings={"wait_seconds": 10},
-            )),
+            list_required_chats=AsyncMock(return_value=[]),
+            list_requirements=AsyncMock(return_value=[requirement]),
         ),
-        reaction_repo=SimpleNamespace(),
-        chat_repo=SimpleNamespace(),
+        reaction_repo=SimpleNamespace(
+            has_reaction=AsyncMock(side_effect=AssertionError("live reaction lookup is obsolete")),
+            has_recent_reaction=AsyncMock(
+                side_effect=AssertionError("live reaction lookup is obsolete")
+            ),
+        ),
+        chat_repo=SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    chat_id=CHANNEL,
+                    username="target",
+                    title="Target",
+                    invite_url="https://t.me/target",
+                )
+            ),
+        ),
     )
-    assert await evaluator.configured_wait_seconds(1) == 10
+
 
 @pytest.mark.asyncio
-async def test_canonical_target_chat_id_wins_over_incorrect_legacy_target(database: Database) -> None:
-    from unittest.mock import AsyncMock
-    repository = ReactionRepository(database)
-    await repository.observe_post(CHANNEL, MESSAGE, 1_800_000_000_000)
-    await repository.replace_user_message_reactions(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, emojis=("👍",), updated_at_ms=1_800_000_001_000)
-    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
-    evaluator = OfferEvaluator(bot=SimpleNamespace(), offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)), requirement_repo=SimpleNamespace(
-        list_required_chats=AsyncMock(return_value=[]), list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
-        get_requirement=AsyncMock(return_value=SimpleNamespace(id=3, type="REACT", target="-1000000000000", target_chat_id=CHANNEL, settings={"react_post": "any_recent", "last_x_messages": 5, "last_x_days": 1000}))), reaction_repo=repository, chat_repo=SimpleNamespace())
+async def test_react_gate_stays_pending_until_wait_is_completed(
+    evaluator: OfferEvaluator,
+) -> None:
     result = await evaluator.evaluate(1, USER)
-    assert result.all_passed
+    assert not result.all_passed
     assert result.gates[0].target_id == CHANNEL
+    assert result.gates[0].target_label == "@target"
+    assert result.gates[0].url == "https://t.me/target"
+    assert result.gates[0].reason == "pending_wait"
+
+    completed = await evaluator.evaluate(1, USER, fake_wait_completed=True)
+    assert completed.all_passed
+    assert completed.gates[0].reason is None
+
 
 @pytest.mark.asyncio
-async def test_update_flow_observe_react_replace_remove_and_any_recent(database: Database) -> None:
-    from unittest.mock import AsyncMock
-    handler = ReactionUpdateHandler(database)
-    post = Update.de_json({"update_id": 1001, "channel_post": {"message_id": MESSAGE, "date": 1800000001, "chat": {"id": CHANNEL, "type": "channel", "title": "Target"}, "text": "fresh post"}}, bot=None)
-    await handler.handle_update(post, None)
-    def update(update_id: int, old: list[dict[str, str]], new: list[dict[str, str]]) -> Update:
-        return Update.de_json({"update_id": update_id, "message_reaction": {"chat": {"id": CHANNEL, "type": "channel", "title": "Target"}, "message_id": MESSAGE, "user": {"id": USER, "is_bot": False, "first_name": "Test"}, "date": 1800000002, "old_reaction": old, "new_reaction": new}}, bot=None)
-    await handler.handle_update(update(1002, [], [{"type": "emoji", "emoji": "👍"}]), None)
-    repository = ReactionRepository(database)
-    assert await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍")
-    await handler.handle_update(update(1003, [{"type": "emoji", "emoji": "👍"}], [{"type": "emoji", "emoji": "❤️"}]), None)
-    assert not await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="👍")
-    assert await repository.has_reaction(user_id=USER, channel_id=CHANNEL, message_id=MESSAGE, required_emoji="❤️")
-    offer = Offer(1, 1, b"x" * 32, None, "Offer", None, True, 1, 1, 1, "offer")
-    evaluator = OfferEvaluator(bot=SimpleNamespace(), offer_repo=SimpleNamespace(get=AsyncMock(return_value=offer)), requirement_repo=SimpleNamespace(
-        list_required_chats=AsyncMock(return_value=[]), list_requirements=AsyncMock(return_value=[SimpleNamespace(requirement_id=3)]),
-        get_requirement=AsyncMock(return_value=SimpleNamespace(id=3, type="REACT", target="-1", target_chat_id=CHANNEL, settings={"react_post": "any_recent", "last_x_messages": 5, "last_x_days": 1000}))), reaction_repo=repository, chat_repo=SimpleNamespace())
-    assert (await evaluator.evaluate(1, USER)).all_passed
-    await handler.handle_update(update(1004, [{"type": "emoji", "emoji": "❤️"}], []), None)
-    assert not (await evaluator.evaluate(1, USER)).all_passed
+async def test_configured_wait_uses_prompt_wait_requirement(
+    evaluator: OfferEvaluator,
+) -> None:
+    assert await evaluator.configured_wait_seconds(1) == 5
+
 
 @pytest.mark.asyncio
-async def test_anonymous_and_unrelated_reactions_do_not_satisfy_any_recent(database: Database) -> None:
-    handler = ReactionUpdateHandler(database)
-    anonymous = Update.de_json({"update_id": 2001, "message_reaction": {"chat": {"id": CHANNEL, "type": "channel"}, "message_id": MESSAGE, "date": 1800000001, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]}}, bot=None)
-    await handler.handle_update(anonymous, None)
-    unrelated = Update.de_json({"update_id": 2002, "message_reaction": {"chat": {"id": CHANNEL - 1, "type": "channel"}, "message_id": MESSAGE + 1, "user": {"id": USER, "is_bot": False, "first_name": "Test"}, "date": 1800000001, "old_reaction": [], "new_reaction": [{"type": "emoji", "emoji": "👍"}]}}, bot=None)
-    await handler.handle_update(unrelated, None)
-    assert not await ReactionRepository(database).has_recent_reaction(user_id=USER, channel_id=CHANNEL, last_x_messages=5, last_x_days=1000, now_ms=1_800_000_002_000)
+async def test_canonical_target_chat_id_wins_over_legacy_target(
+    evaluator: OfferEvaluator,
+) -> None:
+    result = await evaluator.evaluate(1, USER, fake_wait_completed=True)
+    assert result.gates[0].target_id == CHANNEL
+    evaluator.chat_repo.get.assert_awaited_once_with(CHANNEL)

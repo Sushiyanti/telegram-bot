@@ -1,8 +1,10 @@
 """Temporary M5 category and requirement commands and their limited inline callbacks."""
+
 from __future__ import annotations
 
 import logging
 import re
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -36,7 +38,12 @@ async def add_category_command(update: Update, context: ContextTypes.DEFAULT_TYP
     except (InvalidRecord, ValueError) as exc:
         await message.reply_text(str(exc))
         return
-    await _audit(_database(context), update.effective_user.id, "category_created", str(category.id))
+    await _audit(
+        _database(context),
+        update.effective_user.id,
+        "category_created",
+        str(category.id),
+    )
     await message.reply_text(f"Category {category.name} created.")
 
 
@@ -52,7 +59,12 @@ async def link_category_command(update: Update, context: ContextTypes.DEFAULT_TY
     except (InvalidRecord, RecordNotFound) as exc:
         await message.reply_text(str(exc))
         return
-    await _audit(_database(context), update.effective_user.id, "category_linked", f"{context.args[0]}->{context.args[1]}")
+    await _audit(
+        _database(context),
+        update.effective_user.id,
+        "category_linked",
+        f"{context.args[0]}->{context.args[1]}",
+    )
     await message.reply_text("Category link created.")
 
 
@@ -122,14 +134,18 @@ async def delete_category_command(update: Update, context: ContextTypes.DEFAULT_
         return
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(
-                "A: Delete category and orphaned requirements",
-                callback_data=f"delcat:a:{category.id}:{user.id}",
-            )],
-            [InlineKeyboardButton(
-                "B: Delete category, keep requirements",
-                callback_data=f"delcat:b:{category.id}:{user.id}",
-            )],
+            [
+                InlineKeyboardButton(
+                    "A: Delete category and orphaned requirements",
+                    callback_data=f"delcat:a:{category.id}:{user.id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "B: Delete category, keep requirements",
+                    callback_data=f"delcat:b:{category.id}:{user.id}",
+                )
+            ],
             [InlineKeyboardButton("Cancel", callback_data=f"delcat:x:{category.id}:{user.id}")],
         ]
     )

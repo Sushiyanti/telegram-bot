@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import re
 import asyncio
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +16,11 @@ from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
 from media_bot.db.models import MediaItem, StorageMessageRef
-from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    ShareLinkRepository,
+    UploaderRepository,
+)
 from media_bot.handlers.sharing import (
     adduser_command,
     redeem_command,
@@ -24,9 +28,8 @@ from media_bot.handlers.sharing import (
     share_command,
     start_command,
 )
-from media_bot.services.core import ShareLinkService
 from media_bot.media_transfer import TransferCapabilities
-
+from media_bot.services.core import ShareLinkService
 
 ADMIN_ID = 710001
 USER_ID = 710002
@@ -89,9 +92,7 @@ def make_context(
     return SimpleNamespace(
         args=args or [],
         bot=bot,
-        application=SimpleNamespace(
-            bot_data={"settings": app_settings, "database": database}
-        ),
+        application=SimpleNamespace(bot_data={"settings": app_settings, "database": database}),
     )
 
 
@@ -127,12 +128,14 @@ async def create_link(
         ItemRepository(database),
         TransferCapabilities(2_147_483_648),
     )
-    return (await service.create(
-        item_id=item_id,
-        created_by_user_id=ADMIN_ID,
-        expires_at_ms=expires_at_ms,
-        max_uses=max_uses,
-    )).token
+    return (
+        await service.create(
+            item_id=item_id,
+            created_by_user_id=ADMIN_ID,
+            expires_at_ms=expires_at_ms,
+            max_uses=max_uses,
+        )
+    ).token
 
 
 async def test_schema_v5_has_uploader_and_rate_limit_tables(database: Database) -> None:
@@ -140,14 +143,16 @@ async def test_schema_v5_has_uploader_and_rate_limit_tables(database: Database) 
     assert version == 10
     assert writable
     async with database.connection() as connection:
-        rows = await (await connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        )).fetchall()
+        rows = await (
+            await connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        ).fetchall()
     names = {row["name"] for row in rows}
     assert {"users", "uploaders", "redeem_rate_limits"} <= names
 
 
-async def test_uploader_repository_add_and_revoke_are_database_backed(database: Database) -> None:
+async def test_uploader_repository_add_and_revoke_are_database_backed(
+    database: Database,
+) -> None:
     repository = UploaderRepository(database)
     assert await repository.add(user_id=USER_ID, added_by=ADMIN_ID)
     assert await repository.is_active(USER_ID)
@@ -169,64 +174,99 @@ async def test_uploader_regrant_restores_revoked_grant(database: Database) -> No
 
 async def test_redeem_success_creates_grant_and_audit(database: Database) -> None:
     repository = UploaderRepository(database)
-    assert await repository.redeem(
-        user_id=USER_ID,
-        supplied_code="verify-me",
-        configured_code="verify-me",
-        now_ms=1_000_000,
-    ) == "success"
+    assert (
+        await repository.redeem(
+            user_id=USER_ID,
+            supplied_code="verify-me",
+            configured_code="verify-me",
+            now_ms=1_000_000,
+        )
+        == "success"
+    )
     assert await repository.is_active(USER_ID)
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT action FROM audit_log WHERE actor_id = ?", (USER_ID,)
-        )).fetchone()
+        row = await (
+            await connection.execute("SELECT action FROM audit_log WHERE actor_id = ?", (USER_ID,))
+        ).fetchone()
     assert row["action"] == "redeem_success"
 
 
-async def test_redeem_failure_is_audited_without_persisting_code(database: Database) -> None:
+async def test_redeem_failure_is_audited_without_persisting_code(
+    database: Database,
+) -> None:
     repository = UploaderRepository(database)
-    assert await repository.redeem(
-        user_id=USER_ID,
-        supplied_code="wrong-secret",
-        configured_code="verify-me",
-        now_ms=2_000_000,
-    ) == "invalid"
+    assert (
+        await repository.redeem(
+            user_id=USER_ID,
+            supplied_code="wrong-secret",
+            configured_code="verify-me",
+            now_ms=2_000_000,
+        )
+        == "invalid"
+    )
     assert not await repository.is_active(USER_ID)
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
-        )).fetchone()
-        limits = await (await connection.execute(
-            "SELECT COUNT(*) FROM redeem_rate_limits WHERE user_id = ?", (USER_ID,)
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
+            )
+        ).fetchone()
+        limits = await (
+            await connection.execute(
+                "SELECT COUNT(*) FROM redeem_rate_limits WHERE user_id = ?", (USER_ID,)
+            )
+        ).fetchone()
     assert row["action"] == "redeem_fail"
     assert row["target_id"] == str(USER_ID)
     assert int(limits[0]) == 1
 
 
-async def test_redeem_rate_limits_second_attempt_within_30_seconds(database: Database) -> None:
+async def test_redeem_rate_limits_second_attempt_within_30_seconds(
+    database: Database,
+) -> None:
     repository = UploaderRepository(database)
-    assert await repository.redeem(
-        user_id=USER_ID, supplied_code="bad", configured_code="verify-me", now_ms=3_000_000
-    ) == "invalid"
-    assert await repository.redeem(
-        user_id=USER_ID, supplied_code="verify-me", configured_code="verify-me", now_ms=3_029_999
-    ) == "rate_limited"
+    assert (
+        await repository.redeem(
+            user_id=USER_ID,
+            supplied_code="bad",
+            configured_code="verify-me",
+            now_ms=3_000_000,
+        )
+        == "invalid"
+    )
+    assert (
+        await repository.redeem(
+            user_id=USER_ID,
+            supplied_code="verify-me",
+            configured_code="verify-me",
+            now_ms=3_029_999,
+        )
+        == "rate_limited"
+    )
     assert not await repository.is_active(USER_ID)
     async with database.connection() as connection:
-        rows = await (await connection.execute(
-            "SELECT action FROM audit_log WHERE actor_id = ? ORDER BY id", (USER_ID,)
-        )).fetchall()
+        rows = await (
+            await connection.execute(
+                "SELECT action FROM audit_log WHERE actor_id = ? ORDER BY id",
+                (USER_ID,),
+            )
+        ).fetchall()
     assert [row["action"] for row in rows] == ["redeem_fail", "redeem_fail"]
 
 
 async def test_redeem_allows_attempt_after_cooldown(database: Database) -> None:
     repository = UploaderRepository(database)
     await repository.redeem(
-        user_id=USER_ID, supplied_code="bad", configured_code="verify-me", now_ms=4_000_000
+        user_id=USER_ID,
+        supplied_code="bad",
+        configured_code="verify-me",
+        now_ms=4_000_000,
     )
     result = await repository.redeem(
-        user_id=USER_ID, supplied_code="verify-me", configured_code="verify-me", now_ms=4_030_000
+        user_id=USER_ID,
+        supplied_code="verify-me",
+        configured_code="verify-me",
+        now_ms=4_030_000,
     )
     assert result == "success"
     assert await repository.is_active(USER_ID)
@@ -277,14 +317,18 @@ async def test_admin_uploader_commands_refuse_non_admins_and_audit(
     await admin_only(command)(update, context)
     update.effective_message.reply_text.assert_awaited_once_with("Not authorized.")
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
+            )
+        ).fetchone()
     assert row["action"] == "admin_denied"
     assert row["target_id"] == command.__name__
 
 
-async def test_share_command_returns_bot_deeplink_and_persists_only_hash(database: Database) -> None:
+async def test_share_command_returns_bot_deeplink_and_persists_only_hash(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     item_id = await add_item(database)
     update = make_update(user_id=ADMIN_ID)
@@ -329,7 +373,9 @@ async def test_share_allows_active_uploader(database: Database) -> None:
     await UploaderRepository(database).add(user_id=USER_ID, added_by=ADMIN_ID)
     update = make_update(user_id=USER_ID)
     await share_command(update, make_context(database, [str(item_id)]))
-    assert "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+    assert (
+        "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+    )
 
 
 async def test_uploader_cannot_share_another_uploaders_item(database: Database) -> None:
@@ -359,7 +405,9 @@ async def test_admin_can_share_another_uploaders_item(database: Database) -> Non
 
     await share_command(update, context)
 
-    assert "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+    assert (
+        "https://t.me/ShareTestBot?start=" in update.effective_message.reply_text.await_args.args[0]
+    )
     assert len(await ShareLinkRepository(database).list_for_item(item_id)) == 1
 
 
@@ -371,7 +419,9 @@ async def test_start_with_no_token_sends_welcome(database: Database) -> None:
     )
 
 
-async def test_start_delivers_valid_link_to_member_with_protection(database: Database) -> None:
+async def test_start_delivers_valid_link_to_member_with_protection(
+    database: Database,
+) -> None:
     item_id = await add_item(database)
     token = await create_link(database, item_id)
     update = make_update()
@@ -406,10 +456,15 @@ async def test_start_delivers_all_messages_for_album(database: Database) -> None
     context = make_context(database, [token])
     await start_command(update, context)
     assert context.bot.copy_message.await_count == 2
-    assert [call.kwargs["message_id"] for call in context.bot.copy_message.await_args_list] == [202, 203]
+    assert [call.kwargs["message_id"] for call in context.bot.copy_message.await_args_list] == [
+        202,
+        203,
+    ]
 
 
-async def test_start_fails_closed_without_verified_transfer_limit(database: Database) -> None:
+async def test_start_fails_closed_without_verified_transfer_limit(
+    database: Database,
+) -> None:
     item_id = await add_item(database)
     token = await create_link(database, item_id)
     update = make_update()
@@ -447,7 +502,9 @@ async def test_start_ignores_deprecated_global_channel_without_consuming_gate(
     assert link.use_count == 1
 
 
-async def test_start_ignores_deprecated_global_channel_check_errors(database: Database) -> None:
+async def test_start_ignores_deprecated_global_channel_check_errors(
+    database: Database,
+) -> None:
     item_id = await add_item(database)
     token = await create_link(database, item_id)
     bot = SimpleNamespace(

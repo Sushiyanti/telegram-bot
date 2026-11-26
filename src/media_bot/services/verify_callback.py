@@ -7,9 +7,8 @@ no persistent nonce table is needed for this service-layer codec.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
-
+from dataclasses import dataclass
 
 _NONCE_RE = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
 _MAX_CALLBACK_BYTES = 64
@@ -24,7 +23,7 @@ class VerifyCallbackPayload:
     nonce: str
 
     @classmethod
-    def encode(cls, payload: "VerifyCallbackPayload") -> str:
+    def encode(cls, payload: VerifyCallbackPayload) -> str:
         if not isinstance(payload, cls):
             raise TypeError("payload must be VerifyCallbackPayload")
         if payload.offer_id <= 0 or payload.user_id <= 0:
@@ -37,7 +36,7 @@ class VerifyCallbackPayload:
         return encoded
 
     @classmethod
-    def decode(cls, data: str) -> "VerifyCallbackPayload | None":
+    def decode(cls, data: str) -> VerifyCallbackPayload | None:
         if not isinstance(data, str) or len(data.encode("utf-8")) > _MAX_CALLBACK_BYTES:
             return None
         parts = data.split(":")

@@ -2,6 +2,7 @@
 
 PYTHON ?= uv run python
 PYTEST ?= uv run pytest
+RUFF ?= uv run ruff
 DEV_DB_PATH ?= /tmp/telegram-bot-dev.db
 
 clean:
@@ -13,10 +14,10 @@ test:
 	$(PYTEST) -q
 
 lint:
-	$(PYTHON) -m compileall -q src tests
+	$(RUFF) check src tests
 
 format-check:
-	git diff --check
+	$(RUFF) format --check src tests
 
 check: lint format-check test
 

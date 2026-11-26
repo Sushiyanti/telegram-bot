@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
-from media_bot.db.repositories import ItemRepository, OfferDeliveryRepository, OfferEventRepository, ShareLinkRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    OfferDeliveryRepository,
+    OfferEventRepository,
+    ShareLinkRepository,
+)
 from media_bot.media_transfer import send_one
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,9 @@ async def deliver_offer(context: Any, offer: Any, user_id: int) -> DeliveryOutco
         return DeliveryOutcome(False, 0, "db_unlock_error")
 
     item = await ItemRepository(database).get(offer.item_id)
-    references = () if item is None else tuple(sorted(item.storage_messages, key=lambda ref: ref.sequence))
+    references = (
+        () if item is None else tuple(sorted(item.storage_messages, key=lambda ref: ref.sequence))
+    )
     if not references:
         await _record_failure(database, offer.id, user_id, "no_storage_messages", now_ms)
         return DeliveryOutcome(False, 0, "no_storage_messages")
@@ -57,7 +63,9 @@ async def deliver_offer(context: Any, offer: Any, user_id: int) -> DeliveryOutco
             )
         except Exception:
             logger.exception("offer_copy_failed", extra={"index": index})
-            await _record_failure(database, offer.id, user_id, f"copy_error_at_index:{index}", now_ms)
+            await _record_failure(
+                database, offer.id, user_id, f"copy_error_at_index:{index}", now_ms
+            )
             return DeliveryOutcome(False, sent, "copy_error")
         sent += 1
 

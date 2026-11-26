@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -17,11 +18,14 @@ from media_bot.config import Settings
 from media_bot.db.audit_repository import AuditLogRepository
 from media_bot.db.database import Database
 from media_bot.db.models import ItemFile, MediaItem, PendingUploadMessage
-from media_bot.db.repositories import ItemRepository, PendingUploadRepository, UploaderRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    PendingUploadRepository,
+    UploaderRepository,
+)
 from media_bot.db.rules import CategoryRepository
 from media_bot.media_transfer import StorageMessageRef
 from media_bot.services import PendingUploadService
-
 
 logger = logging.getLogger(__name__)
 DEFAULT_ALBUM_DEBOUNCE_SECONDS = 1.5
@@ -108,9 +112,7 @@ class UploadHandler:
         self._rejected_groups: dict[tuple[int, str], float] = {}
         self._process_lock = asyncio.Lock()
 
-    async def handle_message(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         message = update.effective_message
         user = update.effective_user
         if message is None or user is None:
@@ -137,11 +139,7 @@ class UploadHandler:
         source_message_id = int(message.message_id)
         raw_group_id = getattr(message, "media_group_id", None)
         is_album = raw_group_id is not None
-        group_id = (
-            str(raw_group_id)
-            if is_album
-            else f"single:{chat_id}:{source_message_id}"
-        )
+        group_id = str(raw_group_id) if is_album else f"single:{chat_id}:{source_message_id}"
         key = (chat_id, group_id)
 
         async with self._locked_group(key):
@@ -188,11 +186,7 @@ class UploadHandler:
             pending_message = PendingUploadMessage(
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
-                sequence=(
-                    int(message.message_id)
-                    if is_album
-                    else 0
-                ),
+                sequence=(int(message.message_id) if is_album else 0),
                 media_type=media.media_type,
                 file_id=media.file_id,
                 file_unique_id=media.file_unique_id,
@@ -212,7 +206,10 @@ class UploadHandler:
             except Exception as exc:
                 logger.error(
                     "upload_pending_record_failed",
-                    extra={"event_name": "upload_pending_record_failed", "exception_type": type(exc).__name__},
+                    extra={
+                        "event_name": "upload_pending_record_failed",
+                        "exception_type": type(exc).__name__,
+                    },
                 )
                 if is_album:
                     self._rejected_groups[key] = time.monotonic() + max(
@@ -230,16 +227,17 @@ class UploadHandler:
                     except Exception as cleanup_exc:
                         logger.error(
                             "pending_upload_cleanup_failed",
-                            extra={"event_name": "pending_upload_cleanup_failed", "exception_type": type(cleanup_exc).__name__},
+                            extra={
+                                "event_name": "pending_upload_cleanup_failed",
+                                "exception_type": type(cleanup_exc).__name__,
+                            },
                         )
                 await self._audit(
                     actor_id=user_id,
                     action="storage_copy_failed",
                     target_id="pending_record",
                 )
-                await self._reply(
-                    message, bot, user_id, "Storage temporarily unavailable."
-                )
+                await self._reply(message, bot, user_id, "Storage temporarily unavailable.")
                 return
 
             if is_album:
@@ -271,10 +269,12 @@ class UploadHandler:
         reply_message: Any | None,
     ) -> None:
         buttons = [
-            [InlineKeyboardButton(
-                category.name[:64],
-                callback_data=f"uselect:{upload.upload_id}:{category.id}",
-            )]
+            [
+                InlineKeyboardButton(
+                    category.name[:64],
+                    callback_data=f"uselect:{upload.upload_id}:{category.id}",
+                )
+            ]
             for category in categories
         ]
         markup = InlineKeyboardMarkup(buttons)
@@ -287,7 +287,10 @@ class UploadHandler:
         except Exception as exc:
             logger.error(
                 "category_selection_prompt_failed",
-                extra={"event_name": "category_selection_prompt_failed", "exception_type": type(exc).__name__},
+                extra={
+                    "event_name": "category_selection_prompt_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )
 
     async def process_selected_upload(
@@ -308,9 +311,7 @@ class UploadHandler:
             reply_message,
         )
 
-    def _pre_copy_rejection(
-        self, message: Any, media: _MessageMedia
-    ) -> tuple[str, str] | None:
+    def _pre_copy_rejection(self, message: Any, media: _MessageMedia) -> tuple[str, str] | None:
         size = media.file_size_bytes
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             return "size_unknown", "Cannot store this media: size unavailable."
@@ -376,16 +377,17 @@ class UploadHandler:
         except Exception as exc:
             logger.error(
                 "album_settle_failed",
-                extra={"event_name": "album_settle_failed", "exception_type": type(exc).__name__},
+                extra={
+                    "event_name": "album_settle_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )
         finally:
             if self._album_tasks.get(key) is asyncio.current_task():
                 self._album_tasks.pop(key, None)
 
     @asynccontextmanager
-    async def _locked_group(
-        self, key: tuple[int, str]
-    ) -> AsyncIterator[None]:
+    async def _locked_group(self, key: tuple[int, str]) -> AsyncIterator[None]:
         """Serialize one album key without retaining idle locks indefinitely."""
         lock = self._group_locks.setdefault(key, asyncio.Lock())
         self._group_lock_users[key] = self._group_lock_users.get(key, 0) + 1
@@ -621,10 +623,7 @@ class UploadHandler:
                 return
 
             if not is_album:
-                confirmation = (
-                    f"Stored. Item ID: {saved.id} | "
-                    f"Size: {total_bytes} bytes."
-                )
+                confirmation = f"Stored. Item ID: {saved.id} | Size: {total_bytes} bytes."
             else:
                 confirmation = (
                     f"Stored. Item ID: {saved.id} | "
@@ -658,15 +657,16 @@ class UploadHandler:
             if task is not None and not task.done():
                 task.cancel()
             try:
-                upload = await self.pending.repository.get_by_owner_and_group(
-                    user_id, group_key[1]
-                )
+                upload = await self.pending.repository.get_by_owner_and_group(user_id, group_key[1])
                 if upload is not None and upload.pipeline == "m2":
                     await self._delete_pending(upload.upload_id)
             except Exception as exc:
                 logger.error(
                     "pending_upload_cleanup_failed",
-                    extra={"event_name": "pending_upload_cleanup_failed", "exception_type": type(exc).__name__},
+                    extra={
+                        "event_name": "pending_upload_cleanup_failed",
+                        "exception_type": type(exc).__name__,
+                    },
                 )
         await self._audit(
             actor_id=user_id,
@@ -715,7 +715,10 @@ class UploadHandler:
         except Exception as exc:
             logger.error(
                 "pending_upload_cleanup_failed",
-                extra={"event_name": "pending_upload_cleanup_failed", "exception_type": type(exc).__name__},
+                extra={
+                    "event_name": "pending_upload_cleanup_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )
 
     async def _audit(self, *, actor_id: int, action: str, target_id: str) -> None:
@@ -729,13 +732,14 @@ class UploadHandler:
         except Exception as exc:
             logger.error(
                 "upload_audit_write_failed",
-                extra={"event_name": "upload_audit_write_failed", "exception_type": type(exc).__name__},
+                extra={
+                    "event_name": "upload_audit_write_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )
 
     @staticmethod
-    async def _reply(
-        message: Any | None, bot: Any, chat_id: int, text: str
-    ) -> None:
+    async def _reply(message: Any | None, bot: Any, chat_id: int, text: str) -> None:
         try:
             if message is not None:
                 await message.reply_text(text)
@@ -744,14 +748,15 @@ class UploadHandler:
         except Exception as exc:
             logger.error(
                 "upload_reply_failed",
-                extra={"event_name": "upload_reply_failed", "exception_type": type(exc).__name__},
+                extra={
+                    "event_name": "upload_reply_failed",
+                    "exception_type": type(exc).__name__,
+                },
             )
 
     async def recover(self, application: Any) -> None:
         """Resume settled collecting uploads after a restart; discard uncertain copies."""
-        await self.categories.ensure_default_storage_channel(
-            self.settings.storage_channel_id
-        )
+        await self.categories.ensure_default_storage_channel(self.settings.storage_channel_id)
         recoverable = await self.pending.list_recoverable(pipeline="m2")
         now_ms = time.time_ns() // 1_000_000
         for upload in recoverable:

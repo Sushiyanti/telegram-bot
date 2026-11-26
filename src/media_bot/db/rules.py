@@ -1,4 +1,5 @@
 """Repositories for M5 categories, requirements, settings, and reaction state."""
+
 from __future__ import annotations
 
 import json
@@ -31,9 +32,9 @@ class Requirement:
     id: int
     type: str
     target: str | None
-    target_chat_id: int | None
     settings: dict[str, object]
     created_at_ms: int
+    target_chat_id: int | None = None
 
 
 class CategoryRepository:
@@ -51,14 +52,18 @@ class CategoryRepository:
     async def get(self, category_id: int) -> Category | None:
         _positive_id(category_id, "category_id")
         async with self.database.connection() as connection:
-            cursor = await connection.execute("SELECT * FROM categories WHERE id = ?", (category_id,))
+            cursor = await connection.execute(
+                "SELECT * FROM categories WHERE id = ?", (category_id,)
+            )
             row = await cursor.fetchone()
         return None if row is None else _category_from_row(row)
 
     async def get_by_name(self, name: str) -> Category | None:
         name = _category_name(name)
         async with self.database.connection() as connection:
-            cursor = await connection.execute("SELECT * FROM categories WHERE name = ? COLLATE NOCASE", (name,))
+            cursor = await connection.execute(
+                "SELECT * FROM categories WHERE name = ? COLLATE NOCASE", (name,)
+            )
             row = await cursor.fetchone()
         return None if row is None else _category_from_row(row)
 
@@ -73,7 +78,7 @@ class CategoryRepository:
         _chat_id(storage_channel_id, "storage_channel_id")
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute(
+            await connection.execute(
                 """UPDATE categories SET storage_channel_id = ?
                    WHERE name = 'Default' COLLATE NOCASE AND storage_channel_id IS NULL""",
                 (storage_channel_id,),
@@ -187,7 +192,9 @@ class CategoryRepository:
         default = await self.default()
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute("SELECT id FROM categories WHERE id = ?", (category.id,))
+            cursor = await connection.execute(
+                "SELECT id FROM categories WHERE id = ?", (category.id,)
+            )
             if await cursor.fetchone() is None:
                 await connection.rollback()
                 raise RecordNotFound("Category was not found")
@@ -207,7 +214,8 @@ class CategoryRepository:
                 (default.id, category.id),
             )
             await connection.execute(
-                "DELETE FROM rule_assignments WHERE scope_type = 'CATEGORY' AND category_id = ?", (category.id,)
+                "DELETE FROM rule_assignments WHERE scope_type = 'CATEGORY' AND category_id = ?",
+                (category.id,),
             )
             await connection.execute(
                 "DELETE FROM category_links WHERE parent_category_id = ? OR child_category_id = ?",
@@ -256,7 +264,11 @@ class RequirementRepository:
             raise InvalidRecord(
                 "Real START_BOT verification is not supported yet, please use is_fake=True"
             )
-        if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, int) or not 0 <= wait_seconds <= _MAX_WAIT_SECONDS:
+        if (
+            isinstance(wait_seconds, bool)
+            or not isinstance(wait_seconds, int)
+            or not 0 <= wait_seconds <= _MAX_WAIT_SECONDS
+        ):
             raise InvalidRecord(f"wait_seconds must be between 0 and {_MAX_WAIT_SECONDS}")
         if category_id is not None:
             _positive_id(category_id, "category_id")
@@ -282,38 +294,57 @@ class RequirementRepository:
         elif last_x_messages is not None or last_x_days is not None:
             raise InvalidRecord("REACT window settings can only be used with REACT")
         created_at_ms = _now_ms()
-        settings_json = json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        settings_json = json.dumps(
+            settings, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
         try:
             async with self.database.connection() as connection:
                 await connection.execute("BEGIN IMMEDIATE")
                 if category_id is not None:
-                    cursor = await connection.execute("SELECT 1 FROM categories WHERE id = ?", (category_id,))
+                    cursor = await connection.execute(
+                        "SELECT 1 FROM categories WHERE id = ?", (category_id,)
+                    )
                     if await cursor.fetchone() is None:
                         await connection.rollback()
                         raise RecordNotFound("Category was not found")
                 cursor = await connection.execute(
                     "INSERT INTO requirements (type, target, target_chat_id, settings_json, created_at_ms) VALUES (?, ?, ?, ?, ?)",
-                    (requirement_type, stored_target, int(stored_target) if requirement_type in {"JOIN_CHAT", "REACT"} else None, settings_json, created_at_ms),
+                    (
+                        requirement_type,
+                        stored_target,
+                        int(stored_target) if requirement_type in {"JOIN_CHAT", "REACT"} else None,
+                        settings_json,
+                        created_at_ms,
+                    ),
                 )
                 requirement_id = int(cursor.lastrowid)
                 if attach_scope:
                     await connection.execute(
                         "INSERT INTO rule_assignments (scope_type, category_id, requirement_id) VALUES (?, ?, ?)",
-                        ("GLOBAL" if category_id is None else "CATEGORY", category_id, requirement_id),
+                        (
+                            "GLOBAL" if category_id is None else "CATEGORY",
+                            category_id,
+                            requirement_id,
+                        ),
                     )
                 await connection.commit()
         except sqlite3.IntegrityError as exc:
             raise InvalidRecord("Requirement violates database constraints") from exc
         return Requirement(
-            requirement_id, requirement_type, stored_target,
+            requirement_id,
+            requirement_type,
+            stored_target,
+            settings,
+            created_at_ms,
             int(stored_target) if requirement_type in {"JOIN_CHAT", "REACT"} else None,
-            settings, created_at_ms,
         )
 
     async def get(self, requirement_id: int) -> Requirement | None:
         _positive_id(requirement_id, "requirement_id")
         async with self.database.connection() as connection:
-            cursor = await connection.execute("SELECT * FROM requirements WHERE id = ?", (requirement_id,))
+            cursor = await connection.execute(
+                "SELECT * FROM requirements WHERE id = ?", (requirement_id,)
+            )
             row = await cursor.fetchone()
         return None if row is None else _requirement_from_row(row)
 
@@ -365,8 +396,11 @@ class RequirementRepository:
             )
             rows = await cursor.fetchall()
         return tuple(
-            "Global" if row["scope_type"] == "GLOBAL" else
-            (str(row["name"]) if row["scope_type"] == "CATEGORY" else f"Offer {row['offer_id']}")
+            "Global"
+            if row["scope_type"] == "GLOBAL"
+            else (
+                str(row["name"]) if row["scope_type"] == "CATEGORY" else f"Offer {row['offer_id']}"
+            )
             for row in rows
         )
 
@@ -391,9 +425,7 @@ class RequirementRepository:
             await connection.commit()
         return cursor.rowcount == 1
 
-    async def remove_from_scope(
-        self, *, category_id: int | None, requirement_id: int
-    ) -> bool:
+    async def remove_from_scope(self, *, category_id: int | None, requirement_id: int) -> bool:
         """Remove only this scope's association; delete the rule when unreferenced."""
         if category_id is not None:
             _positive_id(category_id, "category_id")
@@ -436,14 +468,18 @@ class BotSettingsRepository:
 
     async def user_commands_enabled(self) -> bool:
         async with self.database.connection() as connection:
-            cursor = await connection.execute("SELECT value FROM bot_settings WHERE key = ?", (self.COMMANDS_KEY,))
+            cursor = await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = ?", (self.COMMANDS_KEY,)
+            )
             row = await cursor.fetchone()
         return True if row is None else str(row["value"]).lower() == "true"
 
     async def toggle_user_commands(self) -> bool:
         async with self.database.connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
-            cursor = await connection.execute("SELECT value FROM bot_settings WHERE key = ?", (self.COMMANDS_KEY,))
+            cursor = await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = ?", (self.COMMANDS_KEY,)
+            )
             row = await cursor.fetchone()
             enabled = not (row is not None and str(row["value"]).lower() == "true")
             await connection.execute(
@@ -638,7 +674,9 @@ def _category_from_row(row) -> Category:
     return Category(
         id=int(row["id"]),
         name=str(row["name"]),
-        storage_channel_id=None if row["storage_channel_id"] is None else int(row["storage_channel_id"]),
+        storage_channel_id=None
+        if row["storage_channel_id"] is None
+        else int(row["storage_channel_id"]),
         created_at_ms=int(row["created_at_ms"]),
     )
 
@@ -648,9 +686,9 @@ def _requirement_from_row(row) -> Requirement:
         id=int(row["id"]),
         type=str(row["type"]),
         target=None if row["target"] is None else str(row["target"]),
-        target_chat_id=(
-            None if row["target_chat_id"] is None else int(row["target_chat_id"])
-        ) if "target_chat_id" in row.keys() else None,
+        target_chat_id=(None if row["target_chat_id"] is None else int(row["target_chat_id"]))
+        if "target_chat_id" in row.keys()
+        else None,
         settings=json.loads(str(row["settings_json"])),
         created_at_ms=int(row["created_at_ms"]),
     )
@@ -666,7 +704,12 @@ def _category_name(value: str) -> str:
 
 def _validate_target(requirement_type: str, target: str | int | None) -> str | None:
     if requirement_type == "TIMED_WAIT":
-        if target is not None and str(target).strip().lower() not in {"", "-", "null", "none"}:
+        if target is not None and str(target).strip().lower() not in {
+            "",
+            "-",
+            "null",
+            "none",
+        }:
             raise InvalidRecord("TIMED_WAIT target must be '-' or null")
         return None
     if requirement_type in {"JOIN_CHAT", "REACT"}:
@@ -674,7 +717,9 @@ def _validate_target(requirement_type: str, target: str | int | None) -> str | N
         try:
             parsed = int(raw, 10)
         except (ValueError, TypeError) as exc:
-            raise InvalidRecord(f"{requirement_type} target must be a numeric Telegram chat ID") from exc
+            raise InvalidRecord(
+                f"{requirement_type} target must be a numeric Telegram chat ID"
+            ) from exc
         _chat_id(parsed, "target")
         return str(parsed)
     raw = str(target).strip() if target is not None else ""
@@ -723,8 +768,13 @@ def _emoji_key(value: str) -> str:
 
 def _validate_reaction_emoji(value: str) -> str:
     import unicodedata
+
     clean = value.strip() if isinstance(value, str) else ""
-    if not clean or len(clean) > 8 or any(unicodedata.category(ch)[0] not in {"S", "C"} for ch in clean):
+    if (
+        not clean
+        or len(clean) > 8
+        or any(unicodedata.category(ch)[0] not in {"S", "C"} for ch in clean)
+    ):
         raise InvalidRecord("reaction emoji is required and must be a single emoji")
     return clean
 
@@ -735,7 +785,12 @@ def _positive_id(value: int, field: str) -> None:
 
 
 def _chat_id(value: int, field: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value == 0 or not -(1 << 63) <= value <= _INT64_MAX:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value == 0
+        or not -(1 << 63) <= value <= _INT64_MAX
+    ):
         raise InvalidRecord(f"{field} must be a non-zero signed 64-bit integer")
 
 

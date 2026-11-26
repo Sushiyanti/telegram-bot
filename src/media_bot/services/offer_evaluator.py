@@ -7,13 +7,11 @@ callers can fail closed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
-import logging
 from typing import Any
 from urllib.parse import urlsplit
-
-from media_bot.db.rules import Requirement
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +55,9 @@ class OfferEvaluationResult:
 
     @property
     def has_misconfigured_gate(self) -> bool:
-        return any(gate.reason in {"misconfigured", "misconfigured_admin"} for gate in self.unmet_gates)
+        return any(
+            gate.reason in {"misconfigured", "misconfigured_admin"} for gate in self.unmet_gates
+        )
 
 
 def _classify_chat_member(member: Any) -> tuple[bool, str | None]:
@@ -82,7 +82,15 @@ def _classify_chat_member(member: Any) -> tuple[bool, str | None]:
 class OfferEvaluator:
     """Evaluate all enabled offer gates using fresh, mockable repository calls."""
 
-    def __init__(self, *, bot: Any, offer_repo: Any, requirement_repo: Any, reaction_repo: Any, chat_repo: Any) -> None:
+    def __init__(
+        self,
+        *,
+        bot: Any,
+        offer_repo: Any,
+        requirement_repo: Any,
+        reaction_repo: Any,
+        chat_repo: Any,
+    ) -> None:
         self.bot = bot
         self.offer_repo = offer_repo
         self.requirement_repo = requirement_repo
@@ -90,103 +98,91 @@ class OfferEvaluator:
         self.chat_repo = chat_repo
 
     async def configured_wait_seconds(self, offer_id: int) -> int:
-        """Return the longest configured gate wait for a Verify attempt."""
+        """Return the longest wait among fake prompt-and-wait gates."""
         waits: list[int] = []
         for assignment in await self._list_requirements(offer_id):
             requirement = await self._resolve_requirement(assignment)
             settings = getattr(requirement, "settings", {}) or {}
             try:
-                waits.append(max(0, int(settings.get("wait_seconds", 0))))
+                if str(getattr(requirement, "type", "")).upper() == "REACT":
+                    waits.append(max(0, int(settings.get("wait_seconds", 0))))
             except (TypeError, ValueError):
                 continue
         return max(waits, default=0)
 
-    async def evaluate(self, offer_id: int, user_id: int) -> OfferEvaluationResult:
+    async def evaluate(
+        self, offer_id: int, user_id: int, *, fake_wait_completed: bool = False
+    ) -> OfferEvaluationResult:
         offer = await self._offer(offer_id)
         if offer is None or not bool(getattr(offer, "is_enabled", False)):
             raise OfferNotFound(f"offer {offer_id} is missing or disabled")
 
         gates: list[OfferGateResult] = []
         for assignment in await self._list_required_chats(offer_id):
-            chat_id = int(getattr(assignment, "chat_id"))
+            chat_id = int(assignment.chat_id)
             chat = await self._chat(chat_id)
             label, url = _chat_presentation(chat, chat_id)
             if chat is None:
-                gates.append(OfferGateResult(
-                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured_admin"
-                ))
+                gates.append(
+                    OfferGateResult(
+                        OfferGateKind.JOIN,
+                        chat_id,
+                        label,
+                        None,
+                        False,
+                        "misconfigured_admin",
+                    )
+                )
                 continue
             if url is None:
-                gates.append(OfferGateResult(
-                    OfferGateKind.JOIN, chat_id, label, None, False, "misconfigured_admin"
-                ))
+                gates.append(
+                    OfferGateResult(
+                        OfferGateKind.JOIN,
+                        chat_id,
+                        label,
+                        None,
+                        False,
+                        "misconfigured_admin",
+                    )
+                )
                 continue
             try:
                 member = await self.bot.get_chat_member(chat_id=chat_id, user_id=user_id)
                 passed, reason = _classify_chat_member(member)
             except Exception:
                 passed, reason = False, "unavailable"
-            gates.append(OfferGateResult(
-                OfferGateKind.JOIN, chat_id, label, url, passed, reason
-            ))
+            gates.append(OfferGateResult(OfferGateKind.JOIN, chat_id, label, url, passed, reason))
 
         for assignment in await self._list_requirements(offer_id):
             requirement = await self._resolve_requirement(assignment)
             if requirement is None or str(getattr(requirement, "type", "")).upper() != "REACT":
-                gates.append(OfferGateResult(
-                    OfferGateKind.REACT, _target_id(requirement), _requirement_label(requirement),
-                    _requirement_url(requirement), False, "unavailable"
-                ))
+                gates.append(
+                    OfferGateResult(
+                        OfferGateKind.REACT,
+                        _target_id(requirement),
+                        _requirement_label(requirement),
+                        _requirement_url(requirement),
+                        False,
+                        "unavailable",
+                    )
+                )
                 continue
             target_id = _target_id(requirement)
-            settings = getattr(requirement, "settings", {}) or {}
-            try:
-                canonical_channel_id = getattr(requirement, "target_chat_id", None)
-                channel_id = int(
-                    canonical_channel_id
-                    if canonical_channel_id is not None
-                    else getattr(requirement, "target")
+            chat = await self._chat(target_id) if target_id is not None else None
+            label, url = _chat_presentation(chat, target_id or 0)
+            # REACT is intentionally prompt-and-wait only. Telegram does not
+            # expose a reliable user-reaction verification API for this bot.
+            gates.append(
+                OfferGateResult(
+                    OfferGateKind.REACT,
+                    target_id,
+                    label,
+                    url,
+                    fake_wait_completed,
+                    None if fake_wait_completed else "pending_wait",
                 )
-                logger.info(
-                    "offer_requirement_evaluation offer_id=%s user_id=%s requirement_id=%s type=REACT channel_id=%s mode=%s",
-                    offer_id, user_id, getattr(requirement, "id", None), channel_id,
-                    settings.get("react_post", "any_recent"),
-                )
-                required_emoji = (
-                    str(settings["reaction_emoji"])
-                    if settings.get("reaction_emoji") else None
-                )
-                react_post = str(settings.get("react_post", "any_recent")).strip()
-                message_id = _specific_message_id(react_post)
-                if react_post.casefold() != "any_recent" and message_id is None:
-                    passed, reason = False, "misconfigured_admin"
-                elif message_id is not None and hasattr(self.reaction_repo, "has_reaction"):
-                    passed = await self.reaction_repo.has_reaction(
-                        user_id=user_id,
-                        channel_id=channel_id,
-                        message_id=message_id,
-                        required_emoji=required_emoji,
-                    )
-                    reason = None if passed else "missing_reaction"
-                else:
-                    passed = await self.reaction_repo.has_recent_reaction(
-                        user_id=user_id,
-                        channel_id=channel_id,
-                        last_x_messages=int(settings.get("last_x_messages", 5)),
-                        last_x_days=int(settings.get("last_x_days", 0)),
-                        required_emoji=required_emoji,
-                    )
-                    reason = None if passed else "missing_reaction"
-            except Exception:
-                passed, reason = False, "unavailable"
-            gates.append(OfferGateResult(
-                OfferGateKind.REACT,
-                target_id,
-                _requirement_label(requirement),
-                _requirement_url(requirement),
-                bool(passed),
-                reason,
-            ))
+            )
+
         return OfferEvaluationResult(offer_id, user_id, tuple(gates))
 
     async def _offer(self, offer_id: int) -> Any:
@@ -207,7 +203,7 @@ class OfferEvaluator:
         if method is not None:
             return await method(chat_id)
         rows = await self.chat_repo.list_enabled()
-        return next((row for row in rows if int(getattr(row, "chat_id")) == chat_id), None)
+        return next((row for row in rows if int(row.chat_id) == chat_id), None)
 
     async def _resolve_requirement(self, assignment: Any) -> Any:
         if hasattr(assignment, "type"):
@@ -243,11 +239,7 @@ def _chat_presentation(chat: Any, chat_id: int) -> tuple[str, str | None]:
 def _target_id(requirement: Any) -> int | None:
     try:
         canonical_channel_id = getattr(requirement, "target_chat_id", None)
-        return int(
-            canonical_channel_id
-            if canonical_channel_id is not None
-            else getattr(requirement, "target")
-        )
+        return int(canonical_channel_id if canonical_channel_id is not None else requirement.target)
     except (TypeError, ValueError):
         return None
 
@@ -274,7 +266,10 @@ def _specific_message_id(value: str) -> int | None:
         parsed = urlsplit(raw)
     except ValueError:
         return None
-    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in {"t.me", "telegram.me"}:
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() not in {
+        "t.me",
+        "telegram.me",
+    }:
         return None
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 2 or not parts[-1].isdigit() or int(parts[-1]) <= 0:
@@ -283,6 +278,10 @@ def _specific_message_id(value: str) -> int | None:
 
 
 __all__ = [
-    "OfferEvaluationResult", "OfferEvaluator", "OfferGateKind", "OfferGateResult",
-    "OfferNotFound", "_classify_chat_member",
+    "OfferEvaluationResult",
+    "OfferEvaluator",
+    "OfferGateKind",
+    "OfferGateResult",
+    "OfferNotFound",
+    "_classify_chat_member",
 ]

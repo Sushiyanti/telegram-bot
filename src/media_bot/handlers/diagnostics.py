@@ -13,7 +13,6 @@ from media_bot.auth import admin_only, is_admin
 from media_bot.config import Settings
 from media_bot.db.database import Database
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -58,9 +57,7 @@ async def collect_config_checks(
         )
     except Exception as exc:
         logger.warning("configcheck getChat failed (%s)", type(exc).__name__)
-        checks.append(
-            DiagnosticCheck("Storage channel reachable (getChat)", False, "unavailable")
-        )
+        checks.append(DiagnosticCheck("Storage channel reachable (getChat)", False, "unavailable"))
 
     bot_is_admin = False
     if storage_is_channel and bot_identity is not None:
@@ -77,13 +74,9 @@ async def collect_config_checks(
             detail = "unavailable"
     else:
         detail = "identity or private channel unavailable"
-    checks.append(
-        DiagnosticCheck("Bot is a storage-channel administrator", bot_is_admin, detail)
-    )
+    checks.append(DiagnosticCheck("Bot is a storage-channel administrator", bot_is_admin, detail))
 
-    private_channel = (
-        storage_is_channel and getattr(storage_chat, "username", None) is None
-    )
+    private_channel = storage_is_channel and getattr(storage_chat, "username", None) is None
     checks.append(
         DiagnosticCheck(
             "Storage channel is private",
@@ -102,9 +95,7 @@ async def collect_config_checks(
         if admin_ids_valid
         else "invalid or empty; IDs redacted"
     )
-    checks.append(
-        DiagnosticCheck("ADMIN_IDS parsed", admin_ids_valid, admin_detail)
-    )
+    checks.append(DiagnosticCheck("ADMIN_IDS parsed", admin_ids_valid, admin_detail))
 
     database_open = database.path.is_file()
     version: int | None = None
@@ -157,24 +148,18 @@ async def collect_config_checks(
     return checks
 
 
-async def whoami_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Report the caller's numeric ID and effective admin status."""
     user = update.effective_user
     message = update.effective_message
     if user is not None and message is not None:
         database = context.application.bot_data.get("database")
         admin_status = "yes" if await is_admin(user.id, database) else "no"
-        await message.reply_text(
-            f"Your user_id: {user.id}\nAdmin: {admin_status}"
-        )
+        await message.reply_text(f"Your user_id: {user.id}\nAdmin: {admin_status}")
 
 
 @admin_only
-async def configcheck_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def configcheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Report sanitized PASS/FAIL results for startup configuration checks."""
     message = update.effective_message
     if message is None:
@@ -194,7 +179,6 @@ async def configcheck_command(
 
     lines = ["Config check:"]
     lines.extend(
-        f"[{ 'PASS' if check.passed else 'FAIL' }] {check.name}: {check.detail}"
-        for check in checks
+        f"[{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.detail}" for check in checks
     )
     await message.reply_text("\n".join(lines))

@@ -13,12 +13,15 @@ from media_bot.auth import admin_only
 from media_bot.config import Settings, configure_admin_ids
 from media_bot.db.database import Database
 from media_bot.db.models import ItemFile, MediaItem
-from media_bot.db.repositories import ItemRepository, ShareLinkRepository, UploaderRepository
+from media_bot.db.repositories import (
+    ItemRepository,
+    ShareLinkRepository,
+    UploaderRepository,
+)
 from media_bot.handlers.admin import delete_command, list_command
 from media_bot.handlers.sharing import revoke_command, start_command
 from media_bot.media_transfer import StorageMessageRef, TransferCapabilities
 from media_bot.services.core import ShareLinkService
-
 
 ADMIN_ID = 710001
 USER_ID = 710002
@@ -125,12 +128,12 @@ async def create_link(database: Database, item_id: int) -> str:
         ItemRepository(database),
         TransferCapabilities(2_147_483_648),
     )
-    return (
-        await service.create(item_id=item_id, created_by_user_id=ADMIN_ID)
-    ).token
+    return (await service.create(item_id=item_id, created_by_user_id=ADMIN_ID)).token
 
 
-async def test_admin_list_shows_recent_metadata_but_never_file_ids(database: Database) -> None:
+async def test_admin_list_shows_recent_metadata_but_never_file_ids(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     await add_item(database, with_file_metadata=True)
     update = make_update(ADMIN_ID)
@@ -177,14 +180,18 @@ async def test_list_refuses_non_admin_and_audits_denial(database: Database) -> N
     update.effective_message.reply_text.assert_awaited_once_with("Not authorized.")
     assert await ItemRepository(database).get(item_id) is not None
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT action, target_id FROM audit_log WHERE actor_id = ?", (USER_ID,)
+            )
+        ).fetchone()
     assert row["action"] == "admin_denied"
     assert row["target_id"] == "list_command"
 
 
-async def test_admin_delete_cleans_database_dependencies_and_storage_posts(database: Database) -> None:
+async def test_admin_delete_cleans_database_dependencies_and_storage_posts(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     item_id = await add_item(database, with_file_metadata=True)
     token = await create_link(database, item_id)
@@ -194,10 +201,13 @@ async def test_admin_delete_cleans_database_dependencies_and_storage_posts(datab
     await admin_only(delete_command)(update, context)
 
     assert await ItemRepository(database).get(item_id) is None
-    assert await ShareLinkRepository(database).find_active_by_hash(
-        __import__("hashlib").sha256(token.encode("ascii")).digest(),
-        now_ms=1_800_000_000_000,
-    ) is None
+    assert (
+        await ShareLinkRepository(database).find_active_by_hash(
+            __import__("hashlib").sha256(token.encode("ascii")).digest(),
+            now_ms=1_800_000_000_000,
+        )
+        is None
+    )
     async with database.connection() as connection:
         for table in (
             "item_storage_messages",
@@ -205,19 +215,21 @@ async def test_admin_delete_cleans_database_dependencies_and_storage_posts(datab
             "item_files",
             "item_file_fingerprints",
         ):
-            row = await (await connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE item_id = ?", (item_id,)
-            )).fetchone()
+            row = await (
+                await connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE item_id = ?", (item_id,)
+                )
+            ).fetchone()
             assert int(row[0]) == 0
-    context.bot.delete_message.assert_awaited_once_with(
-        chat_id=STORAGE_CHANNEL_ID, message_id=202
-    )
+    context.bot.delete_message.assert_awaited_once_with(chat_id=STORAGE_CHANNEL_ID, message_id=202)
     update.effective_message.reply_text.assert_awaited_once_with(
         f"Item {item_id} deleted; removed 1 storage message(s)."
     )
 
 
-async def test_delete_refuses_non_admin_and_leaves_item_intact(database: Database) -> None:
+async def test_delete_refuses_non_admin_and_leaves_item_intact(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     item_id = await add_item(database)
     update = make_update(USER_ID)
@@ -230,7 +242,9 @@ async def test_delete_refuses_non_admin_and_leaves_item_intact(database: Databas
     context.bot.delete_message.assert_not_awaited()
 
 
-async def test_delete_handles_already_missing_storage_message(database: Database) -> None:
+async def test_delete_handles_already_missing_storage_message(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     item_id = await add_item(database)
     update = make_update(ADMIN_ID)
@@ -243,10 +257,15 @@ async def test_delete_handles_already_missing_storage_message(database: Database
 
     assert await ItemRepository(database).get(item_id) is None
     assert "deleted from the database" in update.effective_message.reply_text.await_args.args[0]
-    assert "Could not delete 1 storage message" in update.effective_message.reply_text.await_args.args[0]
+    assert (
+        "Could not delete 1 storage message"
+        in update.effective_message.reply_text.await_args.args[0]
+    )
 
 
-async def test_revoke_cannot_remove_a_configured_admin_grant(database: Database) -> None:
+async def test_revoke_cannot_remove_a_configured_admin_grant(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     uploader_repository = UploaderRepository(database)
     await uploader_repository.add(user_id=ADMIN_ID, added_by=ADMIN_ID)
@@ -260,7 +279,9 @@ async def test_revoke_cannot_remove_a_configured_admin_grant(database: Database)
     )
 
 
-async def test_missing_storage_copy_returns_exact_fallback_and_removes_item(database: Database) -> None:
+async def test_missing_storage_copy_returns_exact_fallback_and_removes_item(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     item_id = await add_item(database, with_file_metadata=True)
     token = await create_link(database, item_id)
@@ -273,18 +294,21 @@ async def test_missing_storage_copy_returns_exact_fallback_and_removes_item(data
 
     await start_command(update, context)
 
-    update.effective_message.reply_text.assert_awaited_once_with(
-        "This file is no longer available"
-    )
+    update.effective_message.reply_text.assert_awaited_once_with("This file is no longer available")
     assert await ItemRepository(database).get(item_id) is None
     async with database.connection() as connection:
-        row = await (await connection.execute(
-            "SELECT COUNT(*) FROM item_file_fingerprints WHERE item_id = ?", (item_id,)
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT COUNT(*) FROM item_file_fingerprints WHERE item_id = ?",
+                (item_id,),
+            )
+        ).fetchone()
     assert int(row[0]) == 0
 
 
-async def test_revoke_non_admin_is_denied_without_database_change(database: Database) -> None:
+async def test_revoke_non_admin_is_denied_without_database_change(
+    database: Database,
+) -> None:
     configure_admin_ids((ADMIN_ID,))
     repository = UploaderRepository(database)
     await repository.add(user_id=USER_ID, added_by=ADMIN_ID)

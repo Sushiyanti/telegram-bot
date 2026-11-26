@@ -11,8 +11,7 @@ from telegram.error import TelegramError
 
 from media_bot.config import Settings
 from media_bot.db.database import Database
-from media_bot.db.models import MediaItem, Offer
-from media_bot.db.models import RequiredChat
+from media_bot.db.models import MediaItem, Offer, RequiredChat
 from media_bot.db.repositories import (
     ItemRepository,
     OfferEventRepository,
@@ -64,10 +63,31 @@ async def make_item(database: Database) -> int:
 async def make_join_offer(database: Database, slug: str) -> Offer:
     item_id = await make_item(database)
     offer = await OfferRepository(database).create(
-        Offer(0, item_id, hash_share_token(slug), None, "Gated campaign", None, True, OWNER, 1, 1, slug)
+        Offer(
+            0,
+            item_id,
+            hash_share_token(slug),
+            None,
+            "Gated campaign",
+            None,
+            True,
+            OWNER,
+            1,
+            1,
+            slug,
+        )
     )
     await RequiredChatRepository(database).upsert(
-        RequiredChat(STORAGE - 1, "channel", "Required channel", "required", True, 1, 1, "https://t.me/required")
+        RequiredChat(
+            STORAGE - 1,
+            "channel",
+            "Required channel",
+            "required",
+            True,
+            1,
+            1,
+            "https://t.me/required",
+        )
     )
     await OfferRequirementRepository(database).add_required_chat(offer.id, STORAGE - 1)
     return offer
@@ -109,7 +129,8 @@ async def test_t3_disabled_legacy_import_logs_exact_warning_once(
     with caplog.at_level(logging.WARNING):
         assert await run_legacy_required_channel_import(database, -100999) == 0
     matches = [
-        record for record in caplog.records
+        record
+        for record in caplog.records
         if record.getMessage()
         == "REQUIRED_CHANNEL_ID is set but ignored; offer-level requirements are authoritative. See README."
     ]
@@ -124,7 +145,6 @@ async def test_t4_stats_window_is_fixed_and_bounded(database: Database) -> None:
     assert "aggregate, last 30 days" in message.reply_text.await_args.args[0]
 
 
-
 def test_t5_public_start_path_hashes_before_lookup() -> None:
     source = Path("src/media_bot/handlers/sharing.py").read_text()
     assert "get_by_slug_hash(" in source
@@ -137,7 +157,9 @@ async def test_a4a_panel_creation_audits_without_plain_slug(database: Database) 
     bot = SimpleNamespace(edit_message_text=AsyncMock(), send_message=AsyncMock())
     context = SimpleNamespace(
         bot=bot,
-        application=SimpleNamespace(bot_data={"database": database, "settings": make_settings(database)}),
+        application=SimpleNamespace(
+            bot_data={"database": database, "settings": make_settings(database)}
+        ),
     )
     state = {
         "owner_user_id": OWNER,
@@ -161,14 +183,28 @@ async def test_a4b_stats_aggregate_and_offer_output_exclude_slug_secrets(
     item_id = await make_item(database)
     slug = "private_campaign_slug"
     offer = await OfferRepository(database).create(
-        Offer(0, item_id, hash_share_token(slug), None, "Public campaign", None, True, OWNER, 1, 1, slug)
+        Offer(
+            0,
+            item_id,
+            hash_share_token(slug),
+            None,
+            "Public campaign",
+            None,
+            True,
+            OWNER,
+            1,
+            1,
+            slug,
+        )
     )
     now_ms = time.time_ns() // 1_000_000
     await OfferEventRepository(database).append(offer.id, OWNER, "start", at_ms=now_ms)
     await OfferEventRepository(database).append(offer.id, OWNER, "unlock", at_ms=now_ms + 1)
     for args in ([], [str(offer.id)]):
         message = SimpleNamespace(reply_text=AsyncMock())
-        context = SimpleNamespace(args=args, application=SimpleNamespace(bot_data={"database": database}))
+        context = SimpleNamespace(
+            args=args, application=SimpleNamespace(bot_data={"database": database})
+        )
         await stats_command(SimpleNamespace(effective_message=message), context)
         text = message.reply_text.await_args.args[0]
         assert slug not in text
@@ -182,7 +218,19 @@ async def test_a4c_start_plain_slug_end_to_end_has_no_slug_in_debug_logs(
     item_id = await make_item(database)
     slug = "debug_private_slug"
     await OfferRepository(database).create(
-        Offer(0, item_id, hash_share_token(slug), None, "Debug campaign", None, True, OWNER, 1, 1, slug)
+        Offer(
+            0,
+            item_id,
+            hash_share_token(slug),
+            None,
+            "Debug campaign",
+            None,
+            True,
+            OWNER,
+            1,
+            1,
+            slug,
+        )
     )
     message = SimpleNamespace(reply_text=AsyncMock())
     bot = SimpleNamespace(copy_message=AsyncMock())
@@ -190,7 +238,9 @@ async def test_a4c_start_plain_slug_end_to_end_has_no_slug_in_debug_logs(
         args=[slug],
         bot=bot,
         chat_data={},
-        application=SimpleNamespace(bot_data={"database": database, "settings": make_settings(database)}),
+        application=SimpleNamespace(
+            bot_data={"database": database, "settings": make_settings(database)}
+        ),
     )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=OWNER),
@@ -215,7 +265,9 @@ async def test_t5_start_offer_gate_api_error_fails_closed(database: Database) ->
         args=["start_error_slug"],
         bot=bot,
         chat_data={},
-        application=SimpleNamespace(bot_data={"database": database, "settings": make_settings(database)}),
+        application=SimpleNamespace(
+            bot_data={"database": database, "settings": make_settings(database)}
+        ),
     )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=OWNER),
@@ -227,9 +279,12 @@ async def test_t5_start_offer_gate_api_error_fails_closed(database: Database) ->
     text = message.reply_text.await_args.args[0]
     assert "unavailable" in text.lower()
     async with database.connection() as connection:
-        rows = await (await connection.execute(
-            "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id", (offer.id,)
-        )).fetchall()
+        rows = await (
+            await connection.execute(
+                "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id",
+                (offer.id,),
+            )
+        ).fetchall()
     event_types = [row["event_type"] for row in rows]
     assert event_types == ["start"]
     assert "unlock" not in event_types
@@ -237,7 +292,9 @@ async def test_t5_start_offer_gate_api_error_fails_closed(database: Database) ->
 
 
 @pytest.mark.asyncio
-async def test_t5_verify_callback_gate_api_error_fails_closed(database: Database) -> None:
+async def test_t5_verify_callback_gate_api_error_fails_closed(
+    database: Database,
+) -> None:
     offer = await make_join_offer(database, "verify_error_slug")
     message = SimpleNamespace(reply_text=AsyncMock())
     bot = SimpleNamespace(
@@ -248,7 +305,9 @@ async def test_t5_verify_callback_gate_api_error_fails_closed(database: Database
         args=["verify_error_slug"],
         bot=bot,
         chat_data={},
-        application=SimpleNamespace(bot_data={"database": database, "settings": make_settings(database)}),
+        application=SimpleNamespace(
+            bot_data={"database": database, "settings": make_settings(database)}
+        ),
     )
     update = SimpleNamespace(
         effective_user=SimpleNamespace(id=OWNER),
@@ -277,9 +336,12 @@ async def test_t5_verify_callback_gate_api_error_fails_closed(database: Database
     assert bot.copy_message.await_count == 0
     assert "unavailable" in query.edit_message_text.await_args.args[0].lower()
     async with database.connection() as connection:
-        rows = await (await connection.execute(
-            "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id", (offer.id,)
-        )).fetchall()
+        rows = await (
+            await connection.execute(
+                "SELECT event_type FROM offer_events WHERE offer_id = ? ORDER BY id",
+                (offer.id,),
+            )
+        ).fetchall()
     event_types = [row["event_type"] for row in rows]
     assert event_types == ["start"]
     assert "unlock" not in event_types

@@ -21,7 +21,12 @@ def _parser() -> argparse.ArgumentParser:
 
     backup = commands.add_parser("backup", help="create a consistent SQLite backup")
     backup.add_argument("--database", type=Path, required=True, help="live database path")
-    backup.add_argument("--destination", type=Path, required=True, help="new backup path; must not exist")
+    backup.add_argument(
+        "--destination",
+        type=Path,
+        required=True,
+        help="new backup path; must not exist",
+    )
 
     restore = commands.add_parser("restore", help="replace a database from a validated backup")
     restore.add_argument("--backup", type=Path, required=True, help="backup database path")

@@ -1,6 +1,10 @@
 # Telegram Advertise-to-Unlock Bot
 
-A private Telegram media-storage and access-control bot. Milestones 0 and 1 provide the foundation and persistence/core services; Milestone 2 adds private-DM media ingestion; Milestone 3 adds uploader self-verification, share-link commands, optional membership enforcement, and recipient delivery; Milestone 4 adds admin item management, failure handling, and VPS deployment guidance; M5 adds category-specific storage and dynamic access requirements; M6 adds database-backed admin roles and an inline admin panel. M6 was accepted on 2026-11-23 based on mocked validation; live Telegram behavior remains unverified. The [M6 completion handoff](docs/M6_COMPLETION_HANDOFF.md) records the acceptance boundary, and [M7 plan](docs/M7_PLAN.md) scopes isolated transfer-readiness work.
+This is a public marketing funnel, not a private owner-only storage bot. A user opens an offer deep link, completes the configured unlock actions, and receives the campaign media. The unlock price is one or more real Telegram channel/group memberships, with optional clearly labelled prompt-and-wait engagement gates.
+
+Real `JOIN_CHAT` membership is checked with `get_chat_member` and fails closed on API uncertainty. `REACT` is intentionally prompt-and-wait: the bot provides the registered channel prompt and waits for the configured duration, but does not claim to verify a user's reaction. Existing REACT and START_BOT assignments are converted by forward migrations without exposing file IDs or changing token lifecycle data.
+
+The current schema migrates forward to version 13. Migration 0012 converts historical unsupported gates to prompt-and-wait settings while preserving canonical targets, prompt links, assignments, and wait durations. Migration 0013 retires unused live-reaction observation tables. Back up SQLite before migrations; never run development resets against `data/bot.db`.
 
 ## Runtime and dependencies
 

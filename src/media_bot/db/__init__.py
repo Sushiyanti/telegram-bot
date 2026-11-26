@@ -17,7 +17,6 @@ from media_bot.db.models import (
     ShareLink,
     StorageMessageRef,
 )
-from media_bot.media_transfer import TransferCapabilities
 from media_bot.db.repositories import (
     ItemRepository,
     OfferDeliveryRepository,
@@ -28,6 +27,7 @@ from media_bot.db.repositories import (
     RequiredChatRepository,
     ShareLinkRepository,
 )
+from media_bot.media_transfer import TransferCapabilities
 
 __all__ = [
     "AuditLogRepository",

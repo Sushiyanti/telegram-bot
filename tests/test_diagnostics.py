@@ -43,9 +43,7 @@ def make_update(user_id: int) -> SimpleNamespace:
 def make_context(settings: Settings, database: Database, bot: object) -> SimpleNamespace:
     return SimpleNamespace(
         bot=bot,
-        application=SimpleNamespace(
-            bot_data={"settings": settings, "database": database}
-        ),
+        application=SimpleNamespace(bot_data={"settings": settings, "database": database}),
     )
 
 
@@ -53,9 +51,7 @@ def make_passing_bot() -> SimpleNamespace:
     return SimpleNamespace(
         get_me=AsyncMock(return_value=SimpleNamespace(id=700001)),
         get_chat=AsyncMock(return_value=SimpleNamespace(type="channel", username=None)),
-        get_chat_member=AsyncMock(
-            return_value=SimpleNamespace(status="administrator")
-        ),
+        get_chat_member=AsyncMock(return_value=SimpleNamespace(status="administrator")),
     )
 
 
@@ -115,9 +111,7 @@ async def test_configcheck_mocked_fail_logs_nonzero_and_redacts_errors(
 
     bot = SimpleNamespace(
         get_me=AsyncMock(side_effect=RuntimeError("secret-test-token")),
-        get_chat=AsyncMock(
-            return_value=SimpleNamespace(type="channel", username="public_name")
-        ),
+        get_chat=AsyncMock(return_value=SimpleNamespace(type="channel", username="public_name")),
         get_chat_member=AsyncMock(),
     )
     update = make_update(settings.admin_ids[0])

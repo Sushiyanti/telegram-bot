@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import tempfile
 import logging
+import tempfile
 from pathlib import Path
 
 from media_bot.db.database import Database
 from media_bot.db.models import RequiredChat
-from media_bot.db.repositories import OfferRequirementRepository, OfferRepository, RequiredChatRepository
-
+from media_bot.db.repositories import (
+    OfferRepository,
+    OfferRequirementRepository,
+    RequiredChatRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +52,22 @@ async def import_legacy_required_channel(
     logger.warning(
         "REQUIRED_CHANNEL_ID is deprecated; migrate requirements to per-offer chat assignments"
     )
-    if isinstance(required_channel_id, bool) or not isinstance(required_channel_id, int) or required_channel_id == 0:
+    if (
+        isinstance(required_channel_id, bool)
+        or not isinstance(required_channel_id, int)
+        or required_channel_id == 0
+    ):
         raise ValueError("required_channel_id must be a non-zero integer")
 
     async with database.connection() as connection:
         await connection.execute(
             "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('REQUIRED_CHANNEL_IMPORT_V1', 'pending')"
         )
-        row = await (await connection.execute(
-            "SELECT value FROM bot_settings WHERE key = 'REQUIRED_CHANNEL_IMPORT_V1'"
-        )).fetchone()
+        row = await (
+            await connection.execute(
+                "SELECT value FROM bot_settings WHERE key = 'REQUIRED_CHANNEL_IMPORT_V1'"
+            )
+        ).fetchone()
     if row is not None and str(row["value"]) == "done":
         return 0
 
